@@ -91,6 +91,8 @@
   }
   .nav-link:hover{background:var(--surface2);color:var(--text);}
 
+  .save-status{font-size:12px;color:var(--text-secondary);white-space:nowrap;}
+
   .streak-badge{
     display:inline-flex;align-items:center;gap:4px;
     font-size:13px;font-weight:700;
@@ -321,6 +323,7 @@
   <div class="topnav-inner">
     <div class="brand" data-action="go-library"><span class="brand-dot"></span>MedCards</div>
     <div style="display:flex;align-items:center;gap:10px;">
+      <span class="save-status" id="save-status"></span>
       <span class="streak-badge" id="streak-badge" title="Dias seguidos estudando">🔥 0</span>
       <button class="nav-link" id="owner-lock-btn" style="display:none;"></button>
       <a class="nav-link" data-action="go-library">Biblioteca</a>
@@ -334,20 +337,36 @@
 (function(){
   "use strict";
 
-  /* ---------------- Owner gate ---------------- */
-  // null = no PIN required, everyone who opens this file has full edit access
-  // (this is how the owner's own private working copy should stay).
-  // Set to a SHA-256 hex digest of a PIN to require unlocking before anyone
-  // can create/edit/archive/delete anything; visitors without the PIN can
-  // only browse and study, in read-only mode.
-  const OWNER_PIN_HASH = '5e942fa0230798db9f144962ac8fa9f47ceae2ce79e954e2ee4d2cf163eb9a78';
+  /* ---------------- Backend (Val Town) ---------------- */
+  const API_BASE = 'https://henry006original--8baf8222903311f1b9d11607ee4eb77e.web.val.run';
+  // 'private': this file's content lives in the private space, gated behind a PIN even to view.
+  // 'public': content is readable by anyone; only writes require the PIN.
+  const API_SPACE = 'public';
 
-  async function sha256Hex(str){
-    const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
-    return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('');
+  let ownerPin = sessionStorage.getItem('mc_owner_pin') || null;
+  let ownerMode = false;
+
+  async function apiGetPublic(){
+    const res = await fetch(API_BASE + '/public');
+    if(!res.ok) throw new Error('load failed');
+    return res.json();
   }
-
-  let ownerMode = OWNER_PIN_HASH === null || localStorage.getItem('mc_owner_unlocked') === '1';
+  async function apiReadPrivate(pin){
+    const res = await fetch(API_BASE + '/private/read', {
+      method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({pin})
+    });
+    if(res.status === 401){ const e = new Error('unauthorized'); e.code = 401; throw e; }
+    if(!res.ok) throw new Error('load failed');
+    return res.json();
+  }
+  async function apiVerifyPin(pin){
+    try{
+      const res = await fetch(API_BASE + '/verify-pin', {
+        method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({pin})
+      });
+      return res.ok;
+    }catch(e){ return false; }
+  }
 
   const OWNER_ONLY_ACTIONS = new Set([
     'new-modulo','edit-modulo','archive-modulo','restore-modulo','delete-modulo',
@@ -360,7 +379,7 @@
   function updateOwnerLockBtn(){
     const btn = document.getElementById('owner-lock-btn');
     if(!btn) return;
-    if(OWNER_PIN_HASH === null){ btn.style.display = 'none'; return; }
+    if(API_SPACE !== 'public'){ btn.style.display = 'none'; return; }
     btn.style.display = '';
     btn.textContent = ownerMode ? '🔓 Sair' : '🔐 Entrar';
     btn.title = ownerMode ? 'Sair do modo de edição' : 'Entrar como dono para editar';
@@ -386,10 +405,11 @@
     async function trySubmit(){
       const val = input.value;
       if(!val) return;
-      const hash = await sha256Hex(val);
-      if(hash === OWNER_PIN_HASH){
+      const ok = await apiVerifyPin(val);
+      if(ok){
+        ownerPin = val;
+        sessionStorage.setItem('mc_owner_pin', val);
         ownerMode = true;
-        localStorage.setItem('mc_owner_unlocked','1');
         updateOwnerLockBtn();
         closeModal();
         render();
@@ -403,87 +423,166 @@
     input.addEventListener('keydown', (e)=>{ if(e.key==='Enter') trySubmit(); });
   }
 
-  /* ---------------- State & persistence ---------------- */
+  function renderPinGate(errorMsg){
+    appEl.innerHTML = `<div class="empty-state">
+      <span class="emoji">🔒</span>
+      <h3>Conteúdo privado</h3>
+      <p>Digite o PIN para acessar.</p>
+      <div class="form-group" style="max-width:280px;margin:0 auto 14px;text-align:left;">
+        <input type="password" id="gate-pin" placeholder="PIN" style="text-align:center;">
+      </div>
+      ${errorMsg ? `<p style="color:var(--danger);font-size:13px;margin-bottom:14px;">${escapeHtml(errorMsg)}</p>` : ''}
+      <button class="btn btn-primary" id="gate-submit">Entrar</button>
+    </div>`;
+    const input = document.getElementById('gate-pin');
+    input.focus();
+    const submit = ()=>{
+      const val = input.value;
+      if(!val) return;
+      ownerPin = val;
+      sessionStorage.setItem('mc_owner_pin', val);
+      initApp();
+    };
+    document.getElementById('gate-submit').addEventListener('click', submit);
+    input.addEventListener('keydown', (e)=>{ if(e.key==='Enter') submit(); });
+  }
+
+  function showLoading(msg){
+    appEl.innerHTML = `<div class="empty-state"><span class="emoji">⏳</span><p>${escapeHtml(msg||'Carregando…')}</p></div>`;
+  }
+  function showLoadError(msg){
+    appEl.innerHTML = `<div class="empty-state">
+      <span class="emoji">⚠️</span>
+      <h3>Não foi possível carregar</h3>
+      <p>${escapeHtml(msg)}</p>
+      <button class="btn btn-primary" id="retry-load-btn">Tentar de novo</button>
+    </div>`;
+    document.getElementById('retry-load-btn').addEventListener('click', initApp);
+  }
+
+  async function initApp(){
+    showLoading();
+    if(API_SPACE === 'private' && !ownerPin){
+      renderPinGate();
+      return;
+    }
+    try{
+      let data;
+      if(API_SPACE === 'private'){
+        data = await apiReadPrivate(ownerPin);
+        ownerMode = true;
+      }else{
+        data = await apiGetPublic();
+        ownerMode = false;
+        if(ownerPin){
+          const ok = await apiVerifyPin(ownerPin);
+          if(ok) ownerMode = true;
+          else { ownerPin = null; sessionStorage.removeItem('mc_owner_pin'); }
+        }
+      }
+      state.modulos = Array.isArray(data.modulos) ? data.modulos : [];
+      applyLocalProgress(state.modulos);
+      state.streak = loadLocalStreak();
+      view = { type:'library' };
+      render();
+    }catch(err){
+      if(err && err.code === 401){
+        ownerPin = null;
+        sessionStorage.removeItem('mc_owner_pin');
+        if(API_SPACE === 'private'){ renderPinGate('PIN incorreto.'); return; }
+      }
+      showLoadError('Verifique sua conexão com a internet e tente de novo.');
+    }
+  }
+
+  /* ---------------- State (content lives on the server; only per-device study progress is local) ---------------- */
   // Hierarquia: Módulo (ex: SAI) -> Disciplina (ex: Otorrino) -> Aula -> Card
-  const STORAGE_KEY = 'mc_v1';
-  const LEGACY_KEYS = ['medcards_data','mc_v0','medcards','flashcards_data'];
+  let state = { modulos: [], streak: { count: 0, lastDate: null } };
 
   function uid(){
     return 'id_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2,10);
   }
 
-  function defaultState(){
-    return { modulos: [], streak: { count: 0, lastDate: null } };
+  function loadLocalProgress(){
+    try{ return JSON.parse(localStorage.getItem('mc_progress')) || {}; }catch(e){ return {}; }
+  }
+  let localProgress = loadLocalProgress();
+  function saveLocalProgress(){ localStorage.setItem('mc_progress', JSON.stringify(localProgress)); }
+  function applyLocalProgress(modulos){
+    modulos.forEach(m=>m.disciplinas.forEach(d=>d.aulas.forEach(a=>a.cards.forEach(c=>{
+      const p = localProgress[c.id];
+      c.lastResult = p ? p.lastResult : null;
+      c.lastStudiedAt = p ? p.lastStudiedAt : null;
+    }))));
+  }
+  function setCardProgress(cardId, lastResult, lastStudiedAt){
+    if(lastResult == null) delete localProgress[cardId];
+    else localProgress[cardId] = { lastResult, lastStudiedAt };
+    saveLocalProgress();
   }
 
-  function normalizeState(parsed){
-    if(parsed && Array.isArray(parsed.modulos)){
-      if(!parsed.streak) parsed.streak = { count: 0, lastDate: null };
-      return parsed;
+  function loadLocalStreak(){
+    try{ return JSON.parse(localStorage.getItem('mc_streak')) || { count:0, lastDate:null }; }catch(e){ return { count:0, lastDate:null }; }
+  }
+  function saveLocalStreak(){ localStorage.setItem('mc_streak', JSON.stringify(state.streak)); }
+
+  function setSaveStatus(text, isError){
+    const el = document.getElementById('save-status');
+    if(!el) return;
+    el.textContent = text;
+    el.style.color = isError ? 'var(--danger)' : 'var(--text-secondary)';
+    clearTimeout(setSaveStatus._t);
+    if(text){
+      setSaveStatus._t = setTimeout(()=>{ if(el.textContent===text) el.textContent=''; }, isError?4000:1500);
     }
-    if(parsed && Array.isArray(parsed.disciplines)){
-      // Pre-módulo format: wrap existing flat disciplines into a default módulo.
-      return {
-        modulos: [{
-          id: uid(), name: 'Geral', emoji: '📁', color: '#6366f1',
-          archived: false, disciplinas: parsed.disciplines
-        }],
-        streak: parsed.streak || { count: 0, lastDate: null }
-      };
-    }
-    return defaultState();
   }
 
-  function migrateLegacy(){
-    for(const key of LEGACY_KEYS){
-      const raw = localStorage.getItem(key);
-      if(!raw) continue;
-      try{
-        const parsed = JSON.parse(raw);
-        if(parsed && (Array.isArray(parsed.modulos) || Array.isArray(parsed.disciplines))){
-          return parsed;
-        }
-      }catch(e){ /* ignore malformed legacy data */ }
-    }
-    return null;
+  // Coalescing save queue: rapid consecutive edits must never race over the
+  // network and let a stale snapshot overwrite a newer one. At most one
+  // request is ever in flight; each send captures state.modulos fresh at the
+  // moment it actually goes out, and any edits queued up while a request was
+  // in flight trigger exactly one more send with the latest state.
+  let saveInFlight = false;
+  let saveQueued = false;
+
+  function saveContent(){
+    saveQueued = true;
+    if(saveInFlight) return;
+    saveInFlight = true;
+    (async()=>{
+      while(saveQueued){
+        saveQueued = false;
+        await performSave();
+      }
+      saveInFlight = false;
+    })();
   }
 
-  function loadState(){
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if(raw){
-      try{ return normalizeState(JSON.parse(raw)); }catch(e){ /* fall through to fresh state */ }
-    }
-    const migrated = migrateLegacy();
-    if(migrated){
-      return normalizeState(migrated);
-    }
-    return defaultState();
-  }
-
-  function saveState(s){
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(s));
-  }
-
-  // Fill in fields that older saved data might be missing.
-  function ensureDefaults(s){
-    s.modulos.forEach(m=>{
-      m.disciplinas.forEach(d=>{
-        d.aulas.forEach(a=>{
-          a.cards.forEach(c=>{
-            if(c.lastResult===undefined) c.lastResult = null;
-            if(c.lastStudiedAt===undefined) c.lastStudiedAt = null;
-          });
-        });
+  async function performSave(){
+    setSaveStatus('Salvando…');
+    try{
+      const cleanModulos = JSON.parse(JSON.stringify(state.modulos));
+      cleanModulos.forEach(m=>m.disciplinas.forEach(d=>d.aulas.forEach(a=>a.cards.forEach(c=>{
+        c.lastResult = null; c.lastStudiedAt = null;
+      }))));
+      const path = API_SPACE === 'public' ? '/public' : '/private/save';
+      const res = await fetch(API_BASE + path, {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ pin: ownerPin, data: { modulos: cleanModulos } })
       });
-    });
-    return s;
+      if(res.status === 401){
+        setSaveStatus('⚠️ PIN inválido', true);
+        ownerMode = false; ownerPin = null; sessionStorage.removeItem('mc_owner_pin');
+        if(API_SPACE === 'private'){ renderPinGate('Sessão expirada — digite o PIN novamente.'); }
+        else{ updateOwnerLockBtn(); render(); }
+        return;
+      }
+      if(!res.ok) throw new Error('save failed');
+      setSaveStatus('✓ Salvo');
+    }catch(err){
+      setSaveStatus('⚠️ Falha ao salvar — verifique a internet', true);
+    }
   }
-
-  let state = loadState();
-  ensureDefaults(state);
-  if(!state.streak) state.streak = { count: 0, lastDate: null };
-  function persist(){ saveState(state); }
-  persist();
 
   /* ---------------- Helpers ---------------- */
   function shuffle(arr){
@@ -526,7 +625,7 @@
       s.count = 1;
     }
     s.lastDate = today;
-    persist();
+    saveLocalStreak();
   }
   function renderStreakBadge(){
     const el = document.getElementById('streak-badge');
@@ -661,7 +760,7 @@
       const emojiVal = emojiInput.value.trim() || '📁';
       const colorVal = colorInput.value;
       opts.onSave(nameVal, emojiVal, colorVal, isEdit);
-      persist(); closeModal(); render();
+      saveContent(); closeModal(); render();
     });
   }
 
@@ -717,7 +816,7 @@
       }else{
         discipline.aulas.push({ id: uid(), name: nameVal, archived:false, cards:[] });
       }
-      persist(); closeModal(); render();
+      saveContent(); closeModal(); render();
     });
   }
 
@@ -750,7 +849,7 @@
       }else{
         aula.cards.push({ id: uid(), front, back, archived:false, lastResult:null, lastStudiedAt:null });
       }
-      persist(); closeModal();
+      saveContent(); closeModal();
       if(opts.onSaved) opts.onSaved(); else render();
     });
   }
@@ -877,7 +976,7 @@
       currentValid.forEach(c=>{
         aula.cards.push({ id: uid(), front:c.front, back:c.back, archived:false, lastResult:null, lastStudiedAt:null });
       });
-      persist(); closeModal(); render();
+      saveContent(); closeModal(); render();
     });
   }
 
@@ -1317,6 +1416,7 @@
     if(found){
       found.card.lastResult = correct ? 'correto' : 'errou';
       found.card.lastStudiedAt = todayStr();
+      setCardProgress(cardId, found.card.lastResult, found.card.lastStudiedAt);
     }
     if(correct){
       session.correctCount++;
@@ -1338,7 +1438,6 @@
         registerStudyCompletion();
       }
     }
-    persist();
     render();
   }
 
@@ -1352,8 +1451,8 @@
     if(snap.cardId){
       const found = findCard(snap.cardId);
       if(found){ found.card.lastResult = snap.prevResult; found.card.lastStudiedAt = snap.prevStudiedAt; }
+      setCardProgress(snap.cardId, snap.prevResult, snap.prevStudiedAt);
     }
-    persist();
     render();
   }
 
@@ -1465,18 +1564,18 @@
       case 'new-modulo': openModuloModal(null); break;
       case 'edit-modulo': openModuloModal(getModulo(id)); break;
       case 'archive-modulo': {
-        const m = getModulo(id); if(m){ m.archived = true; persist(); render(); }
+        const m = getModulo(id); if(m){ m.archived = true; saveContent(); render(); }
         break;
       }
       case 'restore-modulo': {
-        const m = getModulo(id); if(m){ m.archived = false; persist(); render(); }
+        const m = getModulo(id); if(m){ m.archived = false; saveContent(); render(); }
         break;
       }
       case 'delete-modulo': {
         const m = getModulo(id);
         if(m) openConfirmModal(`Tem certeza que deseja excluir permanentemente o módulo <b>${escapeHtml(m.name)}</b> e todas as suas disciplinas, aulas e cards? Essa ação não pode ser desfeita.`, ()=>{
           state.modulos = state.modulos.filter(x=>x.id!==id);
-          persist();
+          saveContent();
         });
         break;
       }
@@ -1494,19 +1593,19 @@
       }
       case 'archive-discipline': {
         const found = findDiscipline(id);
-        if(found){ found.discipline.archived = true; persist(); render(); }
+        if(found){ found.discipline.archived = true; saveContent(); render(); }
         break;
       }
       case 'restore-discipline': {
         const found = findDiscipline(id);
-        if(found){ found.discipline.archived = false; persist(); render(); }
+        if(found){ found.discipline.archived = false; saveContent(); render(); }
         break;
       }
       case 'delete-discipline': {
         const found = findDiscipline(id);
         if(found) openConfirmModal(`Tem certeza que deseja excluir permanentemente a disciplina <b>${escapeHtml(found.discipline.name)}</b> e todo o seu conteúdo? Essa ação não pode ser desfeita.`, ()=>{
           found.modulo.disciplinas = found.modulo.disciplinas.filter(x=>x.id!==id);
-          persist();
+          saveContent();
         });
         break;
       }
@@ -1524,19 +1623,19 @@
       }
       case 'archive-aula': {
         const found = findAula(id);
-        if(found){ found.aula.archived = true; persist(); render(); }
+        if(found){ found.aula.archived = true; saveContent(); render(); }
         break;
       }
       case 'restore-aula': {
         const found = findAula(id);
-        if(found){ found.aula.archived = false; persist(); render(); }
+        if(found){ found.aula.archived = false; saveContent(); render(); }
         break;
       }
       case 'delete-aula': {
         const found = findAula(id);
         if(found) openConfirmModal(`Tem certeza que deseja excluir permanentemente a aula <b>${escapeHtml(found.aula.name)}</b> e todos os seus cards? Essa ação não pode ser desfeita.`, ()=>{
           found.discipline.aulas = found.discipline.aulas.filter(x=>x.id!==id);
-          persist();
+          saveContent();
         });
         break;
       }
@@ -1554,19 +1653,19 @@
       }
       case 'archive-card': {
         const found = findCard(id);
-        if(found){ found.card.archived = true; persist(); render(); }
+        if(found){ found.card.archived = true; saveContent(); render(); }
         break;
       }
       case 'restore-card': {
         const found = findCard(id);
-        if(found){ found.card.archived = false; persist(); render(); }
+        if(found){ found.card.archived = false; saveContent(); render(); }
         break;
       }
       case 'delete-card': {
         const found = findCard(id);
         if(found) openConfirmModal(`Tem certeza que deseja excluir permanentemente este card? Essa ação não pode ser desfeita.`, ()=>{
           found.aula.cards = found.aula.cards.filter(x=>x.id!==id);
-          persist();
+          saveContent();
         });
         break;
       }
@@ -1632,11 +1731,10 @@
   });
 
   document.getElementById('owner-lock-btn').addEventListener('click', ()=>{
+    if(API_SPACE !== 'public') return;
     if(ownerMode){
-      ownerMode = false;
-      localStorage.removeItem('mc_owner_unlocked');
-      updateOwnerLockBtn();
-      render();
+      ownerMode = false; ownerPin = null; sessionStorage.removeItem('mc_owner_pin');
+      updateOwnerLockBtn(); render();
     }else{
       openPinModal();
     }
@@ -1644,7 +1742,7 @@
 
   /* ---------------- Init ---------------- */
   updateOwnerLockBtn();
-  render();
+  initApp();
 })();
 </script>
 </body>
