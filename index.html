@@ -187,8 +187,6 @@
     font-size:11px;font-weight:700;padding:2px 8px;border-radius:999px;
     white-space:nowrap;
   }
-  .badge-public{background:#22c55e22;color:#4ade80;}
-  .badge-locked{background:#94a3b822;color:#94a3b8;}
   .badge-correct{background:#22c55e22;color:#4ade80;}
   .badge-wrong{background:#f9731622;color:#fb923c;}
 
@@ -242,16 +240,6 @@
   .color-choice.selected{border-color:#fff;}
   .modal-danger-text{color:var(--text-secondary);font-size:14.5px;line-height:1.5;}
   .modal-danger-text b{color:var(--text);}
-
-  .visibility-toggle{display:flex;gap:8px;margin-top:8px;}
-  .visibility-option{
-    flex:1;padding:10px;border-radius:var(--radius-sm);
-    background:var(--surface2);border:2px solid transparent;
-    font-size:13.5px;font-weight:600;text-align:center;
-    transition:border-color .15s,background .15s;
-  }
-  .visibility-option.selected{border-color:var(--accent);background:var(--accent-dim);}
-  .visibility-hint{font-size:12px;color:var(--text-secondary);margin-top:6px;line-height:1.4;}
 
   /* Study mode */
   .study-topbar{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;gap:12px;}
@@ -334,6 +322,7 @@
     <div class="brand" data-action="go-library"><span class="brand-dot"></span>MedCards</div>
     <div style="display:flex;align-items:center;gap:10px;">
       <span class="streak-badge" id="streak-badge" title="Dias seguidos estudando">🔥 0</span>
+      <button class="nav-link" id="owner-lock-btn" style="display:none;"></button>
       <a class="nav-link" data-action="go-library">Biblioteca</a>
     </div>
   </div>
@@ -345,12 +334,74 @@
 (function(){
   "use strict";
 
-  /* ---------------- Seed (public snapshot baked in when this file is exported to share) ---------------- */
-  // Empty in the owner's private working copy. When "Compartilhar" generates a
-  // shareable file, this array is filled with a JSON snapshot of the módulos
-  // marked "público". Anything in here is merged in as read-only (locked)
-  // content on top of whatever the person opening the file already has locally.
-  const SEED_MODULOS = [{"id":"id_msdsmx2o_zyzi9ieb","name":"SAI","emoji":"📁","color":"#6366f1","archived":false,"disciplinas":[{"id":"id_msdsnd6l_32qbff7g","name":"Otorrinolaringologia","emoji":"👂","color":"#6366f1","archived":false,"aulas":[{"id":"id_msdsno82_18ychyus","name":"Otite Média Aguda","archived":false,"cards":[{"id":"id_msdso1zr_lyzvwfs8","front":"Qual o agente mais comum na OMA?","back":"Streptococcus pneumoniae","archived":false,"locked":false,"lastResult":null,"lastStudiedAt":null}],"locked":false}],"locked":false}],"visibility":"publico"}];
+  /* ---------------- Owner gate ---------------- */
+  // null = no PIN required, everyone who opens this file has full edit access
+  // (this is how the owner's own private working copy should stay).
+  // Set to a SHA-256 hex digest of a PIN to require unlocking before anyone
+  // can create/edit/archive/delete anything; visitors without the PIN can
+  // only browse and study, in read-only mode.
+  const OWNER_PIN_HASH = '5e942fa0230798db9f144962ac8fa9f47ceae2ce79e954e2ee4d2cf163eb9a78';
+
+  async function sha256Hex(str){
+    const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
+    return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('');
+  }
+
+  let ownerMode = OWNER_PIN_HASH === null || localStorage.getItem('mc_owner_unlocked') === '1';
+
+  const OWNER_ONLY_ACTIONS = new Set([
+    'new-modulo','edit-modulo','archive-modulo','restore-modulo','delete-modulo',
+    'new-discipline','edit-discipline','archive-discipline','restore-discipline','delete-discipline',
+    'new-aula','edit-aula','archive-aula','restore-aula','delete-aula',
+    'new-card','edit-card','archive-card','restore-card','delete-card',
+    'open-import','edit-study-card'
+  ]);
+
+  function updateOwnerLockBtn(){
+    const btn = document.getElementById('owner-lock-btn');
+    if(!btn) return;
+    if(OWNER_PIN_HASH === null){ btn.style.display = 'none'; return; }
+    btn.style.display = '';
+    btn.textContent = ownerMode ? '🔓 Sair' : '🔐 Entrar';
+    btn.title = ownerMode ? 'Sair do modo de edição' : 'Entrar como dono para editar';
+  }
+
+  function openPinModal(){
+    openModal(`
+      <div class="modal-title">🔐 Entrar como dono</div>
+      <p class="modal-danger-text">Digite o PIN para poder criar e editar conteúdo. Sem o PIN, só dá para navegar e estudar.</p>
+      <div class="form-group">
+        <label class="form-label">PIN</label>
+        <input type="password" id="f-pin" placeholder="Digite o PIN">
+      </div>
+      <p class="modal-danger-text" id="pin-error" style="display:none;color:var(--danger);">PIN incorreto.</p>
+      <div class="modal-footer">
+        <button class="btn btn-ghost" data-action="close-modal">Cancelar</button>
+        <button class="btn btn-primary" id="confirm-pin-btn">Entrar</button>
+      </div>
+    `);
+    const input = document.getElementById('f-pin');
+    input.focus();
+    const errorEl = document.getElementById('pin-error');
+    async function trySubmit(){
+      const val = input.value;
+      if(!val) return;
+      const hash = await sha256Hex(val);
+      if(hash === OWNER_PIN_HASH){
+        ownerMode = true;
+        localStorage.setItem('mc_owner_unlocked','1');
+        updateOwnerLockBtn();
+        closeModal();
+        render();
+      }else{
+        errorEl.style.display = '';
+        input.value = '';
+        input.focus();
+      }
+    }
+    document.getElementById('confirm-pin-btn').addEventListener('click', trySubmit);
+    input.addEventListener('keydown', (e)=>{ if(e.key==='Enter') trySubmit(); });
+  }
 
   /* ---------------- State & persistence ---------------- */
   // Hierarquia: Módulo (ex: SAI) -> Disciplina (ex: Otorrino) -> Aula -> Card
@@ -375,7 +426,7 @@
       return {
         modulos: [{
           id: uid(), name: 'Geral', emoji: '📁', color: '#6366f1',
-          archived: false, visibility: 'privado', locked: false, disciplinas: parsed.disciplines
+          archived: false, disciplinas: parsed.disciplines
         }],
         streak: parsed.streak || { count: 0, lastDate: null }
       };
@@ -413,17 +464,12 @@
     localStorage.setItem(STORAGE_KEY, JSON.stringify(s));
   }
 
-  // Fill in fields that older saved data (or freshly merged seed data) might be missing.
+  // Fill in fields that older saved data might be missing.
   function ensureDefaults(s){
     s.modulos.forEach(m=>{
-      if(m.visibility===undefined) m.visibility = 'privado';
-      if(m.locked===undefined) m.locked = false;
       m.disciplinas.forEach(d=>{
-        if(d.locked===undefined) d.locked = false;
         d.aulas.forEach(a=>{
-          if(a.locked===undefined) a.locked = false;
           a.cards.forEach(c=>{
-            if(c.locked===undefined) c.locked = false;
             if(c.lastResult===undefined) c.lastResult = null;
             if(c.lastStudiedAt===undefined) c.lastStudiedAt = null;
           });
@@ -433,54 +479,8 @@
     return s;
   }
 
-  // Merges the baked-in public SEED_MODULOS (read-only/"locked") into local state,
-  // carrying over each visitor's own archived choice + study progress across updates,
-  // while leaving anything the visitor created themselves (unlocked) untouched.
-  function mergeSeed(existingModulos, seedModulosRaw){
-    if(!seedModulosRaw || seedModulosRaw.length===0) return existingModulos;
-    const seedModulos = JSON.parse(JSON.stringify(seedModulosRaw));
-    const oldById = {};
-    existingModulos.filter(m=>m.locked).forEach(m=>{
-      oldById['m_'+m.id] = m;
-      m.disciplinas.forEach(d=>{
-        oldById['d_'+d.id] = d;
-        d.aulas.forEach(a=>{
-          oldById['a_'+a.id] = a;
-          a.cards.forEach(c=>{ oldById['c_'+c.id] = c; });
-        });
-      });
-    });
-    seedModulos.forEach(m=>{
-      m.locked = true; m.visibility = 'publico';
-      const oldM = oldById['m_'+m.id];
-      if(oldM) m.archived = oldM.archived;
-      m.disciplinas.forEach(d=>{
-        d.locked = true;
-        const oldD = oldById['d_'+d.id];
-        if(oldD) d.archived = oldD.archived;
-        d.aulas.forEach(a=>{
-          a.locked = true;
-          const oldA = oldById['a_'+a.id];
-          if(oldA) a.archived = oldA.archived;
-          a.cards.forEach(c=>{
-            c.locked = true;
-            const oldC = oldById['c_'+c.id];
-            if(oldC){
-              c.archived = oldC.archived;
-              c.lastResult = oldC.lastResult || null;
-              c.lastStudiedAt = oldC.lastStudiedAt || null;
-            }
-          });
-        });
-      });
-    });
-    const ownModulos = existingModulos.filter(m=>!m.locked);
-    return [...seedModulos, ...ownModulos];
-  }
-
   let state = loadState();
   ensureDefaults(state);
-  if(SEED_MODULOS.length){ state.modulos = mergeSeed(state.modulos, SEED_MODULOS); }
   if(!state.streak) state.streak = { count: 0, lastDate: null };
   function persist(){ saveState(state); }
   persist();
@@ -606,12 +606,11 @@
   const COLOR_PRESETS = ['#6366f1','#4f46e5','#3b82f6','#1d4ed8','#0ea5e9','#0284c7','#06b6d4','#0891b2','#14b8a6','#0f766e','#22c55e','#15803d','#84cc16','#4d7c0f','#eab308','#ca8a04','#f59e0b','#f97316','#c2410c','#ef4444','#b91c1c','#f43f5e','#be123c','#ec4899','#db2777','#f472b6','#c026d3','#a21caf','#8b5cf6','#7c3aed','#94a3b8','#475569'];
 
   function openEntityModal(opts){
-    // opts: {titleCreate, titleEdit, existing, placeholderName, showVisibility, onSave(nameVal,emojiVal,colorVal,isEdit,visibilityVal)}
+    // opts: {titleCreate, titleEdit, existing, placeholderName, onSave(nameVal,emojiVal,colorVal,isEdit)}
     const isEdit = !!opts.existing;
     const name = isEdit ? opts.existing.name : '';
     const emoji = isEdit ? opts.existing.emoji : EMOJI_PRESETS[0];
     const color = isEdit ? opts.existing.color : COLOR_PRESETS[0];
-    const visibility = isEdit ? (opts.existing.visibility || 'privado') : 'privado';
 
     openModal(`
       <div class="modal-title">${isEdit ? opts.titleEdit : opts.titleCreate}</div>
@@ -633,15 +632,6 @@
           ${COLOR_PRESETS.map(c=>`<button class="color-choice${c===color?' selected':''}" data-color="${c}" style="background:${c}" type="button"></button>`).join('')}
         </div>
       </div>
-      ${opts.showVisibility ? `
-      <div class="form-group">
-        <label class="form-label">Visibilidade</label>
-        <div class="visibility-toggle" id="visibility-toggle">
-          <button type="button" class="visibility-option${visibility==='privado'?' selected':''}" data-visibility="privado">🔒 Privado</button>
-          <button type="button" class="visibility-option${visibility==='publico'?' selected':''}" data-visibility="publico">🌐 Público</button>
-        </div>
-        <p class="visibility-hint">Só módulos "Público" entram quando você gerar um link para compartilhar. O resto fica só com você.</p>
-      </div>` : ''}
       <div class="modal-footer">
         <button class="btn btn-ghost" data-action="close-modal">Cancelar</button>
         <button class="btn btn-primary" id="save-entity-btn">${isEdit?'Salvar':'Criar'}</button>
@@ -665,24 +655,12 @@
       btn.classList.add('selected');
     });
 
-    let visibilityVal = visibility;
-    const visToggle = document.getElementById('visibility-toggle');
-    if(visToggle){
-      visToggle.addEventListener('click', (e)=>{
-        const b = e.target.closest('.visibility-option');
-        if(!b) return;
-        visibilityVal = b.dataset.visibility;
-        visToggle.querySelectorAll('.visibility-option').forEach(x=>x.classList.remove('selected'));
-        b.classList.add('selected');
-      });
-    }
-
     document.getElementById('save-entity-btn').addEventListener('click', ()=>{
       const nameVal = document.getElementById('f-name').value.trim();
       if(!nameVal){ document.getElementById('f-name').focus(); return; }
       const emojiVal = emojiInput.value.trim() || '📁';
       const colorVal = colorInput.value;
-      opts.onSave(nameVal, emojiVal, colorVal, isEdit, visibilityVal);
+      opts.onSave(nameVal, emojiVal, colorVal, isEdit);
       persist(); closeModal(); render();
     });
   }
@@ -691,12 +669,11 @@
     openEntityModal({
       titleCreate: 'Novo módulo', titleEdit: 'Editar módulo', existing,
       placeholderName: 'Ex: SAI',
-      showVisibility: true,
-      onSave: (nameVal, emojiVal, colorVal, isEdit, visibilityVal)=>{
+      onSave: (nameVal, emojiVal, colorVal, isEdit)=>{
         if(isEdit){
-          existing.name = nameVal; existing.emoji = emojiVal; existing.color = colorVal; existing.visibility = visibilityVal;
+          existing.name = nameVal; existing.emoji = emojiVal; existing.color = colorVal;
         }else{
-          state.modulos.push({ id: uid(), name: nameVal, emoji: emojiVal, color: colorVal, archived:false, locked:false, visibility: visibilityVal, disciplinas:[] });
+          state.modulos.push({ id: uid(), name: nameVal, emoji: emojiVal, color: colorVal, archived:false, disciplinas:[] });
         }
       }
     });
@@ -710,7 +687,7 @@
         if(isEdit){
           existing.name = nameVal; existing.emoji = emojiVal; existing.color = colorVal;
         }else{
-          modulo.disciplinas.push({ id: uid(), name: nameVal, emoji: emojiVal, color: colorVal, archived:false, locked:false, aulas:[] });
+          modulo.disciplinas.push({ id: uid(), name: nameVal, emoji: emojiVal, color: colorVal, archived:false, aulas:[] });
         }
       }
     });
@@ -738,7 +715,7 @@
       if(isEdit){
         existing.name = nameVal;
       }else{
-        discipline.aulas.push({ id: uid(), name: nameVal, archived:false, locked:false, cards:[] });
+        discipline.aulas.push({ id: uid(), name: nameVal, archived:false, cards:[] });
       }
       persist(); closeModal(); render();
     });
@@ -771,7 +748,7 @@
       if(isEdit){
         existing.front = front; existing.back = back;
       }else{
-        aula.cards.push({ id: uid(), front, back, archived:false, locked:false, lastResult:null, lastStudiedAt:null });
+        aula.cards.push({ id: uid(), front, back, archived:false, lastResult:null, lastStudiedAt:null });
       }
       persist(); closeModal();
       if(opts.onSaved) opts.onSaved(); else render();
@@ -898,69 +875,84 @@
     confirmBtn.addEventListener('click', ()=>{
       if(currentValid.length===0) return;
       currentValid.forEach(c=>{
-        aula.cards.push({ id: uid(), front:c.front, back:c.back, archived:false, locked:false, lastResult:null, lastStudiedAt:null });
+        aula.cards.push({ id: uid(), front:c.front, back:c.back, archived:false, lastResult:null, lastStudiedAt:null });
       });
       persist(); closeModal(); render();
     });
   }
 
-  /* ---------- Share modal ---------- */
-  function buildPublicSeed(){
-    const pub = state.modulos.filter(m=>m.visibility==='publico' && !m.archived);
-    const clone = JSON.parse(JSON.stringify(pub));
-    clone.forEach(m=>{
-      delete m.locked;
-      m.archived = false;
-      m.disciplinas.forEach(d=>{
-        d.archived = false;
-        d.aulas.forEach(a=>{
-          a.archived = false;
-          a.cards.forEach(c=>{
-            c.archived = false; c.lastResult = null; c.lastStudiedAt = null;
-          });
-        });
-      });
-    });
-    return clone;
+  /* ---------- Export modal ---------- */
+  function buildExportText(cards, delim){
+    return cards.map(c=>{
+      const front = c.front.replace(/\r?\n/g,' ');
+      const back = c.back.replace(/\r?\n/g,' ');
+      return front + delim + back;
+    }).join('\n');
   }
 
-  function openShareModal(){
-    const seed = buildPublicSeed();
-    const json = JSON.stringify(seed);
-    const count = seed.length;
+  function openExportModal(cards, label){
     openModal(`
-      <div class="modal-title">🌐 Compartilhar biblioteca pública</div>
-      <p class="modal-danger-text">
-        ${count===0
-          ? 'Nenhum módulo está marcado como <b>🌐 Público</b> ainda. Edite um módulo e escolha essa opção para incluí-lo aqui.'
-          : `Isso inclui <b>${count}</b> módulo${count===1?'':'s'} marcado${count===1?'':'s'} como público. Copie o código abaixo e me envie na conversa para eu gerar (ou atualizar) o link que você pode compartilhar. Quem abrir o link estuda seu conteúdo sem poder editá-lo, e pode criar os flashcards próprios dela — tudo isso guardado só no aparelho de cada pessoa.`
-        }
-      </p>
-      ${count>0 ? `
+      <div class="modal-title">⇩ Exportar cards</div>
+      <p class="modal-danger-text">${cards.length} card${cards.length===1?'':'s'} no formato Pergunta[delimitador]Resposta, um por linha. Ajuste o delimitador conforme o app de destino (ex: Noji Cards).</p>
       <div class="form-group">
-        <textarea id="share-json" rows="6" readonly style="font-size:11px;">${escapeHtml(json)}</textarea>
-      </div>` : ''}
+        <label class="form-label">Delimitador</label>
+        <input type="text" id="f-export-delim" value="::" style="width:100px;">
+        <div class="delim-shortcuts">
+          <button class="btn btn-sm btn-ghost" data-delim="\t" type="button">Tab</button>
+          <button class="btn btn-sm btn-ghost" data-delim=";" type="button">;</button>
+          <button class="btn btn-sm btn-ghost" data-delim="|" type="button">|</button>
+          <button class="btn btn-sm btn-ghost" data-delim="::" type="button">::</button>
+        </div>
+      </div>
+      <div class="form-group">
+        <textarea id="export-text" rows="10" readonly style="font-size:12.5px;">${escapeHtml(buildExportText(cards,'::'))}</textarea>
+      </div>
       <div class="modal-footer">
         <button class="btn btn-ghost" data-action="close-modal">Fechar</button>
-        ${count>0 ? `<button class="btn btn-primary" id="copy-share-btn">📋 Copiar</button>` : ''}
+        <button class="btn btn-ghost" id="download-export-btn" ${cards.length===0?'disabled':''}>⬇️ Baixar .txt</button>
+        <button class="btn btn-primary" id="copy-export-btn" ${cards.length===0?'disabled':''}>📋 Copiar</button>
       </div>
     `);
-    const copyBtn = document.getElementById('copy-share-btn');
-    if(copyBtn){
-      copyBtn.addEventListener('click', ()=>{
-        const ta = document.getElementById('share-json');
-        ta.focus(); ta.select();
-        const done = ()=>{
-          copyBtn.textContent = '✓ Copiado!';
-          setTimeout(()=>{ if(copyBtn) copyBtn.textContent = '📋 Copiar'; }, 1500);
-        };
-        if(navigator.clipboard && navigator.clipboard.writeText){
-          navigator.clipboard.writeText(ta.value).then(done).catch(()=>{ document.execCommand('copy'); done(); });
-        }else{
-          document.execCommand('copy'); done();
-        }
-      });
+
+    const delimInput = document.getElementById('f-export-delim');
+    const textArea = document.getElementById('export-text');
+    function refreshText(){
+      let delim = delimInput.value;
+      if(delim === '') delim = '::';
+      textArea.value = buildExportText(cards, delim);
     }
+    delimInput.addEventListener('input', refreshText);
+    document.querySelectorAll('#modal-root [data-delim]').forEach(btn=>{
+      btn.addEventListener('click', ()=>{
+        delimInput.value = btn.dataset.delim === '\t' ? '\t' : btn.dataset.delim;
+        refreshText();
+      });
+    });
+
+    const downloadBtn = document.getElementById('download-export-btn');
+    downloadBtn.addEventListener('click', ()=>{
+      const blob = new Blob([textArea.value], {type:'text/plain;charset=utf-8'});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = (label||'flashcards').normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[^\w\-]+/g,'_') + '.txt';
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    });
+
+    const copyBtn = document.getElementById('copy-export-btn');
+    copyBtn.addEventListener('click', ()=>{
+      textArea.focus(); textArea.select();
+      const done = ()=>{
+        copyBtn.textContent = '✓ Copiado!';
+        setTimeout(()=>{ if(copyBtn) copyBtn.textContent = '📋 Copiar'; }, 1500);
+      };
+      if(navigator.clipboard && navigator.clipboard.writeText){
+        navigator.clipboard.writeText(textArea.value).then(done).catch(()=>{ document.execCommand('copy'); done(); });
+      }else{
+        document.execCommand('copy'); done();
+      }
+    });
   }
 
   /* ---------------- Rendering ---------------- */
@@ -973,6 +965,7 @@
     else if(view.type==='aula') renderAulaView();
     else if(view.type==='study') renderStudyView();
     renderStreakBadge();
+    updateOwnerLockBtn();
   }
 
   function renderBreadcrumb(parts){
@@ -996,17 +989,16 @@
 
     let html = renderBreadcrumb([{label:'Biblioteca'}]);
     html += `<h1 class="page-title">Biblioteca</h1><p class="page-sub">Seus módulos de estudo</p>`;
-    html += `<div class="toolbar">
-      <button class="btn btn-primary" data-action="new-modulo">+ Novo módulo</button>
-      <button class="btn btn-ghost" data-action="open-share">🌐 Compartilhar</button>
-    </div>`;
+    if(ownerMode){
+      html += `<div class="toolbar"><button class="btn btn-primary" data-action="new-modulo">+ Novo módulo</button></div>`;
+    }
 
     if(active.length===0 && archived.length===0){
       html += `<div class="empty-state">
         <span class="emoji">📁</span>
         <h3>Nenhum módulo ainda</h3>
-        <p>Crie seu primeiro módulo (ex: SAI) para organizar as disciplinas dentro dele.</p>
-        <button class="btn btn-primary" data-action="new-modulo">+ Novo módulo</button>
+        <p>${ownerMode ? 'Crie seu primeiro módulo (ex: SAI) para organizar as disciplinas dentro dele.' : 'Ainda não há nada para estudar aqui.'}</p>
+        ${ownerMode ? `<button class="btn btn-primary" data-action="new-modulo">+ Novo módulo</button>` : ''}
       </div>`;
     }else{
       html += '<div class="card-list">';
@@ -1018,7 +1010,7 @@
       });
       html += '</div>';
 
-      if(archived.length>0){
+      if(ownerMode && archived.length>0){
         const open = !!uiState.openArchives['lib'];
         html += `<button class="archive-toggle${open?' open':''}" data-action="toggle-archive" data-key="lib"><span class="chev">▶</span> Arquivados (${archived.length})</button>`;
         if(open){
@@ -1033,32 +1025,24 @@
 
   function moduloRow(m, archived){
     const discCount = m.disciplinas.filter(d=>!d.archived).length;
-    const badges = [];
-    if(m.visibility==='publico') badges.push('<span class="badge badge-public">🌐 Público</span>');
-    if(m.locked) badges.push('<span class="badge badge-locked">🔒 Compartilhado</span>');
-    let actions;
-    if(archived){
-      actions = m.locked
-        ? `<button class="btn btn-sm btn-ghost" data-action="restore-modulo" data-id="${m.id}">Restaurar</button>`
-        : `<button class="btn btn-sm btn-ghost" data-action="restore-modulo" data-id="${m.id}">Restaurar</button>
-           <button class="btn btn-sm btn-danger" data-action="delete-modulo" data-id="${m.id}">Excluir</button>`;
-    }else{
-      actions = m.locked
-        ? `<button class="btn-icon" data-action="archive-modulo" data-id="${m.id}" title="Arquivar">🗄️</button>`
-        : `<button class="btn-icon" data-action="edit-modulo" data-id="${m.id}" title="Editar">✏️</button>
-           <button class="btn-icon" data-action="archive-modulo" data-id="${m.id}" title="Arquivar">🗄️</button>
-           <button class="btn-icon" data-action="delete-modulo" data-id="${m.id}" title="Excluir permanentemente">🗑️</button>`;
-    }
     return `<div class="item-row${archived?' archived-row':''}">
       <div class="accent-bar" style="background:${m.color}"></div>
       <div class="item-main" data-action="${archived?'noop':'open-modulo'}" data-id="${m.id}">
         <div class="item-emoji" style="background:${m.color};box-shadow:0 2px 8px ${m.color}55;">${m.emoji}</div>
         <div class="item-text">
           <div class="item-title">${escapeHtml(m.name)}</div>
-          <div class="item-meta">${discCount} disciplina${discCount===1?'':'s'}${badges.length?' · '+badges.join(' '):''}</div>
+          <div class="item-meta">${discCount} disciplina${discCount===1?'':'s'}</div>
         </div>
       </div>
-      <div class="item-actions">${actions}</div>
+      ${ownerMode ? `<div class="item-actions">
+        ${archived
+          ? `<button class="btn btn-sm btn-ghost" data-action="restore-modulo" data-id="${m.id}">Restaurar</button>
+             <button class="btn btn-sm btn-danger" data-action="delete-modulo" data-id="${m.id}">Excluir</button>`
+          : `<button class="btn-icon" data-action="edit-modulo" data-id="${m.id}" title="Editar">✏️</button>
+             <button class="btn-icon" data-action="archive-modulo" data-id="${m.id}" title="Arquivar">🗄️</button>
+             <button class="btn-icon" data-action="delete-modulo" data-id="${m.id}" title="Excluir permanentemente">🗑️</button>`
+        }
+      </div>` : ''}
     </div>`;
   }
 
@@ -1072,18 +1056,19 @@
       {label:'Biblioteca', action:'go-library'},
       {label:m.name}
     ]);
-    html += `<h1 class="page-title">${m.emoji} ${escapeHtml(m.name)}</h1><p class="page-sub">${active.length} disciplina${active.length===1?'':'s'}${m.locked?' · 🔒 compartilhado, somente leitura':''}</p>`;
+    html += `<h1 class="page-title">${m.emoji} ${escapeHtml(m.name)}</h1><p class="page-sub">${active.length} disciplina${active.length===1?'':'s'}</p>`;
     html += `<div class="toolbar">
-      ${m.locked ? '' : `<button class="btn btn-primary" data-action="new-discipline">+ Nova disciplina</button>
-      <button class="btn btn-ghost" data-action="edit-modulo" data-id="${m.id}">Editar módulo</button>`}
+      ${ownerMode ? `<button class="btn btn-primary" data-action="new-discipline">+ Nova disciplina</button>
+      <button class="btn btn-ghost" data-action="edit-modulo" data-id="${m.id}">Editar módulo</button>` : ''}
+      <button class="btn btn-ghost" data-action="export-modulo" data-id="${m.id}">⇩ Exportar tudo</button>
     </div>`;
 
     if(active.length===0 && archived.length===0){
       html += `<div class="empty-state">
         <span class="emoji">📚</span>
         <h3>Nenhuma disciplina ainda</h3>
-        <p>Adicione a primeira disciplina deste módulo (ex: Otorrino, Oftalmo).</p>
-        ${m.locked ? '' : `<button class="btn btn-primary" data-action="new-discipline">+ Nova disciplina</button>`}
+        <p>${ownerMode ? 'Adicione a primeira disciplina deste módulo (ex: Otorrino, Oftalmo).' : 'Ainda não há nada para estudar aqui.'}</p>
+        ${ownerMode ? `<button class="btn btn-primary" data-action="new-discipline">+ Nova disciplina</button>` : ''}
       </div>`;
     }else{
       html += '<div class="card-list">';
@@ -1093,7 +1078,7 @@
       active.forEach(d=>{ html += disciplineRow(d,false); });
       html += '</div>';
 
-      if(archived.length>0){
+      if(ownerMode && archived.length>0){
         const open = !!uiState.openArchives['mod_'+m.id];
         html += `<button class="archive-toggle${open?' open':''}" data-action="toggle-archive" data-key="mod_${m.id}"><span class="chev">▶</span> Arquivadas (${archived.length})</button>`;
         if(open){
@@ -1108,30 +1093,24 @@
 
   function disciplineRow(d, archived){
     const aulaCount = d.aulas.filter(a=>!a.archived).length;
-    const lockBadge = d.locked ? ' · <span class="badge badge-locked">🔒 Compartilhado</span>' : '';
-    let actions;
-    if(archived){
-      actions = d.locked
-        ? `<button class="btn btn-sm btn-ghost" data-action="restore-discipline" data-id="${d.id}">Restaurar</button>`
-        : `<button class="btn btn-sm btn-ghost" data-action="restore-discipline" data-id="${d.id}">Restaurar</button>
-           <button class="btn btn-sm btn-danger" data-action="delete-discipline" data-id="${d.id}">Excluir</button>`;
-    }else{
-      actions = d.locked
-        ? `<button class="btn-icon" data-action="archive-discipline" data-id="${d.id}" title="Arquivar">🗄️</button>`
-        : `<button class="btn-icon" data-action="edit-discipline" data-id="${d.id}" title="Editar">✏️</button>
-           <button class="btn-icon" data-action="archive-discipline" data-id="${d.id}" title="Arquivar">🗄️</button>
-           <button class="btn-icon" data-action="delete-discipline" data-id="${d.id}" title="Excluir permanentemente">🗑️</button>`;
-    }
     return `<div class="item-row${archived?' archived-row':''}">
       <div class="accent-bar" style="background:${d.color}"></div>
       <div class="item-main" data-action="${archived?'noop':'open-discipline'}" data-id="${d.id}">
         <div class="item-emoji" style="background:${d.color}22;">${d.emoji}</div>
         <div class="item-text">
           <div class="item-title">${escapeHtml(d.name)}</div>
-          <div class="item-meta">${aulaCount} aula${aulaCount===1?'':'s'}${lockBadge}</div>
+          <div class="item-meta">${aulaCount} aula${aulaCount===1?'':'s'}</div>
         </div>
       </div>
-      <div class="item-actions">${actions}</div>
+      ${ownerMode ? `<div class="item-actions">
+        ${archived
+          ? `<button class="btn btn-sm btn-ghost" data-action="restore-discipline" data-id="${d.id}">Restaurar</button>
+             <button class="btn btn-sm btn-danger" data-action="delete-discipline" data-id="${d.id}">Excluir</button>`
+          : `<button class="btn-icon" data-action="edit-discipline" data-id="${d.id}" title="Editar">✏️</button>
+             <button class="btn-icon" data-action="archive-discipline" data-id="${d.id}" title="Arquivar">🗄️</button>
+             <button class="btn-icon" data-action="delete-discipline" data-id="${d.id}" title="Excluir permanentemente">🗑️</button>`
+        }
+      </div>` : ''}
     </div>`;
   }
 
@@ -1147,18 +1126,19 @@
       {label:m.name, action:'open-modulo-'+m.id},
       {label:d.name}
     ]);
-    html += `<h1 class="page-title">${d.emoji} ${escapeHtml(d.name)}</h1><p class="page-sub">${active.length} aula${active.length===1?'':'s'}${d.locked?' · 🔒 compartilhado, somente leitura':''}</p>`;
+    html += `<h1 class="page-title">${d.emoji} ${escapeHtml(d.name)}</h1><p class="page-sub">${active.length} aula${active.length===1?'':'s'}</p>`;
     html += `<div class="toolbar">
-      ${d.locked ? '' : `<button class="btn btn-primary" data-action="new-aula">+ Nova aula</button>
-      <button class="btn btn-ghost" data-action="edit-discipline" data-id="${d.id}">Editar disciplina</button>`}
+      ${ownerMode ? `<button class="btn btn-primary" data-action="new-aula">+ Nova aula</button>
+      <button class="btn btn-ghost" data-action="edit-discipline" data-id="${d.id}">Editar disciplina</button>` : ''}
+      <button class="btn btn-ghost" data-action="export-discipline" data-id="${d.id}">⇩ Exportar tudo</button>
     </div>`;
 
     if(active.length===0 && archived.length===0){
       html += `<div class="empty-state">
         <span class="emoji">📖</span>
         <h3>Nenhuma aula ainda</h3>
-        <p>Adicione a primeira aula desta disciplina.</p>
-        ${d.locked ? '' : `<button class="btn btn-primary" data-action="new-aula">+ Nova aula</button>`}
+        <p>${ownerMode ? 'Adicione a primeira aula desta disciplina.' : 'Ainda não há nada para estudar aqui.'}</p>
+        ${ownerMode ? `<button class="btn btn-primary" data-action="new-aula">+ Nova aula</button>` : ''}
       </div>`;
     }else{
       html += '<div class="card-list">';
@@ -1168,7 +1148,7 @@
       active.forEach(a=>{ html += aulaRow(a,false); });
       html += '</div>';
 
-      if(archived.length>0){
+      if(ownerMode && archived.length>0){
         const open = !!uiState.openArchives['disc_'+d.id];
         html += `<button class="archive-toggle${open?' open':''}" data-action="toggle-archive" data-key="disc_${d.id}"><span class="chev">▶</span> Arquivadas (${archived.length})</button>`;
         if(open){
@@ -1183,29 +1163,23 @@
 
   function aulaRow(a, archived){
     const cardCount = a.cards.filter(c=>!c.archived).length;
-    const lockBadge = a.locked ? ' · <span class="badge badge-locked">🔒 Compartilhado</span>' : '';
-    let actions;
-    if(archived){
-      actions = a.locked
-        ? `<button class="btn btn-sm btn-ghost" data-action="restore-aula" data-id="${a.id}">Restaurar</button>`
-        : `<button class="btn btn-sm btn-ghost" data-action="restore-aula" data-id="${a.id}">Restaurar</button>
-           <button class="btn btn-sm btn-danger" data-action="delete-aula" data-id="${a.id}">Excluir</button>`;
-    }else{
-      actions = a.locked
-        ? `<button class="btn-icon" data-action="archive-aula" data-id="${a.id}" title="Arquivar">🗄️</button>`
-        : `<button class="btn-icon" data-action="edit-aula" data-id="${a.id}" title="Editar">✏️</button>
-           <button class="btn-icon" data-action="archive-aula" data-id="${a.id}" title="Arquivar">🗄️</button>
-           <button class="btn-icon" data-action="delete-aula" data-id="${a.id}" title="Excluir permanentemente">🗑️</button>`;
-    }
     return `<div class="item-row${archived?' archived-row':''}">
       <div class="item-main" data-action="${archived?'noop':'open-aula'}" data-id="${a.id}">
         <div class="item-emoji" style="background:var(--accent-dim);">📘</div>
         <div class="item-text">
           <div class="item-title">${escapeHtml(a.name)}</div>
-          <div class="item-meta">${cardCount} card${cardCount===1?'':'s'}${lockBadge}</div>
+          <div class="item-meta">${cardCount} card${cardCount===1?'':'s'}</div>
         </div>
       </div>
-      <div class="item-actions">${actions}</div>
+      ${ownerMode ? `<div class="item-actions">
+        ${archived
+          ? `<button class="btn btn-sm btn-ghost" data-action="restore-aula" data-id="${a.id}">Restaurar</button>
+             <button class="btn btn-sm btn-danger" data-action="delete-aula" data-id="${a.id}">Excluir</button>`
+          : `<button class="btn-icon" data-action="edit-aula" data-id="${a.id}" title="Editar">✏️</button>
+             <button class="btn-icon" data-action="archive-aula" data-id="${a.id}" title="Arquivar">🗄️</button>
+             <button class="btn-icon" data-action="delete-aula" data-id="${a.id}" title="Excluir permanentemente">🗑️</button>`
+        }
+      </div>` : ''}
     </div>`;
   }
 
@@ -1222,23 +1196,24 @@
       {label:d.name, action:'open-discipline-'+d.id},
       {label:a.name}
     ]);
-    html += `<h1 class="page-title">${escapeHtml(a.name)}</h1><p class="page-sub">${active.length} card${active.length===1?'':'s'} ativo${active.length===1?'':'s'}${a.locked?' · 🔒 compartilhado, somente leitura':''}</p>`;
+    html += `<h1 class="page-title">${escapeHtml(a.name)}</h1><p class="page-sub">${active.length} card${active.length===1?'':'s'} ativo${active.length===1?'':'s'}</p>`;
     html += `<div class="toolbar">
       <button class="btn btn-success" data-action="start-study" data-id="${a.id}" ${active.length===0?'disabled':''}>▶ Estudar</button>
-      ${a.locked ? '' : `<button class="btn btn-primary" data-action="new-card">+ Novo card</button>
+      ${ownerMode ? `<button class="btn btn-primary" data-action="new-card">+ Novo card</button>
       <button class="btn btn-ghost" data-action="open-import">⇪ Importar</button>
-      <button class="btn btn-ghost" data-action="edit-aula" data-id="${a.id}">Editar aula</button>`}
+      <button class="btn btn-ghost" data-action="edit-aula" data-id="${a.id}">Editar aula</button>` : ''}
+      <button class="btn btn-ghost" data-action="export-aula" data-id="${a.id}">⇩ Exportar</button>
     </div>`;
 
     if(active.length===0 && archived.length===0){
       html += `<div class="empty-state">
         <span class="emoji">🗂️</span>
         <h3>Nenhum card ainda</h3>
-        <p>Crie cards manualmente ou importe em massa.</p>
-        ${a.locked ? '' : `<div class="toolbar" style="justify-content:center;">
+        <p>${ownerMode ? 'Crie cards manualmente ou importe em massa.' : 'Ainda não há nada para estudar aqui.'}</p>
+        ${ownerMode ? `<div class="toolbar" style="justify-content:center;">
           <button class="btn btn-primary" data-action="new-card">+ Novo card</button>
           <button class="btn btn-ghost" data-action="open-import">⇪ Importar</button>
-        </div>`}
+        </div>` : ''}
       </div>`;
     }else{
       html += '<div class="card-list">';
@@ -1248,7 +1223,7 @@
       active.forEach(c=>{ html += cardRow(c,false); });
       html += '</div>';
 
-      if(archived.length>0){
+      if(ownerMode && archived.length>0){
         const open = !!uiState.openArchives['aula_'+a.id];
         html += `<button class="archive-toggle${open?' open':''}" data-action="toggle-archive" data-key="aula_${a.id}"><span class="chev">▶</span> Arquivados (${archived.length})</button>`;
         if(open){
@@ -1265,20 +1240,6 @@
     const metaBits = [];
     if(c.lastResult==='errou') metaBits.push('<span class="badge badge-wrong">⚠️ Ainda não</span>');
     else if(c.lastResult==='correto') metaBits.push('<span class="badge badge-correct">✓ Entendi</span>');
-    if(c.locked) metaBits.push('<span class="badge badge-locked">🔒 Compartilhado</span>');
-    let actions;
-    if(archived){
-      actions = c.locked
-        ? `<button class="btn btn-sm btn-ghost" data-action="restore-card" data-id="${c.id}">Restaurar</button>`
-        : `<button class="btn btn-sm btn-ghost" data-action="restore-card" data-id="${c.id}">Restaurar</button>
-           <button class="btn btn-sm btn-danger" data-action="delete-card" data-id="${c.id}">Excluir</button>`;
-    }else{
-      actions = c.locked
-        ? `<button class="btn-icon" data-action="archive-card" data-id="${c.id}" title="Arquivar">🗄️</button>`
-        : `<button class="btn-icon" data-action="edit-card" data-id="${c.id}" title="Editar">✏️</button>
-           <button class="btn-icon" data-action="archive-card" data-id="${c.id}" title="Arquivar">🗄️</button>
-           <button class="btn-icon" data-action="delete-card" data-id="${c.id}" title="Excluir permanentemente">🗑️</button>`;
-    }
     return `<div class="item-row card-preview-row${archived?' archived-row':''}">
       <div class="item-main" style="cursor:default;">
         <div class="item-text">
@@ -1287,7 +1248,15 @@
           ${metaBits.length?`<div class="item-meta">${metaBits.join(' ')}</div>`:''}
         </div>
       </div>
-      <div class="item-actions">${actions}</div>
+      ${ownerMode ? `<div class="item-actions">
+        ${archived
+          ? `<button class="btn btn-sm btn-ghost" data-action="restore-card" data-id="${c.id}">Restaurar</button>
+             <button class="btn btn-sm btn-danger" data-action="delete-card" data-id="${c.id}">Excluir</button>`
+          : `<button class="btn-icon" data-action="edit-card" data-id="${c.id}" title="Editar">✏️</button>
+             <button class="btn-icon" data-action="archive-card" data-id="${c.id}" title="Arquivar">🗄️</button>
+             <button class="btn-icon" data-action="delete-card" data-id="${c.id}" title="Excluir permanentemente">🗑️</button>`
+        }
+      </div>` : ''}
     </div>`;
   }
 
@@ -1455,7 +1424,7 @@
 
     html += `<div class="study-controls">
       <button class="btn btn-ghost btn-sm" data-action="undo-answer" ${session.history.length===0?'disabled':''}>↩ Desfazer</button>
-      ${cardData && !cardData.locked?`<button class="btn btn-ghost btn-sm" data-action="edit-study-card" data-id="${cardData.id}">✏️ Editar card</button>`:''}
+      ${cardData && ownerMode?`<button class="btn btn-ghost btn-sm" data-action="edit-study-card" data-id="${cardData.id}">✏️ Editar card</button>`:''}
       <button class="btn btn-ghost btn-sm" data-action="exit-study">Sair do estudo</button>
     </div>`;
 
@@ -1487,11 +1456,11 @@
     const action = btn.dataset.action;
     const id = btn.dataset.id;
 
+    if(OWNER_ONLY_ACTIONS.has(action) && !ownerMode) return;
+
     switch(action){
       case 'go-library': goLibrary(); break;
       case 'noop': break;
-
-      case 'open-share': openShareModal(); break;
 
       case 'new-modulo': openModuloModal(null); break;
       case 'edit-modulo': openModuloModal(getModulo(id)); break;
@@ -1608,6 +1577,28 @@
         break;
       }
 
+      case 'export-aula': {
+        const found = findAula(id);
+        if(found) openExportModal(found.aula.cards.filter(c=>!c.archived), found.aula.name);
+        break;
+      }
+      case 'export-discipline': {
+        const found = findDiscipline(id);
+        if(found){
+          const cards = found.discipline.aulas.filter(a=>!a.archived).flatMap(a=>a.cards.filter(c=>!c.archived));
+          openExportModal(cards, found.discipline.name);
+        }
+        break;
+      }
+      case 'export-modulo': {
+        const m = getModulo(id);
+        if(m){
+          const cards = m.disciplinas.filter(d=>!d.archived).flatMap(d=>d.aulas.filter(a=>!a.archived).flatMap(a=>a.cards.filter(c=>!c.archived)));
+          openExportModal(cards, m.name);
+        }
+        break;
+      }
+
       case 'start-study': startStudy(id); break;
       case 'restart-study': startStudy(id); break;
       case 'reveal-card': revealCard(); break;
@@ -1640,7 +1631,19 @@
     render();
   });
 
+  document.getElementById('owner-lock-btn').addEventListener('click', ()=>{
+    if(ownerMode){
+      ownerMode = false;
+      localStorage.removeItem('mc_owner_unlocked');
+      updateOwnerLockBtn();
+      render();
+    }else{
+      openPinModal();
+    }
+  });
+
   /* ---------------- Init ---------------- */
+  updateOwnerLockBtn();
   render();
 })();
 </script>
