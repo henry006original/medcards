@@ -1445,7 +1445,7 @@
     if(!session || session.history.length===0) return;
     const snap = session.history.pop();
     session.round = snap.round; session.deck = snap.deck; session.reviewDeck = snap.reviewDeck;
-    session.pos = snap.pos; session.revealed = snap.revealed;
+    session.pos = snap.pos; session.revealed = false; // always show the front again, never jump back to the revealed back
     session.correctCount = snap.correctCount; session.wrongCount = snap.wrongCount;
     session.hadReview = snap.hadReview;
     if(snap.cardId){
