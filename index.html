@@ -277,7 +277,9 @@
     position:absolute;bottom:14px;left:0;right:0;
     font-size:12px;color:var(--text-secondary);font-weight:400;
   }
-  .flashcard .back-divider{width:40px;height:2px;background:var(--accent);margin:0 auto 14px;border-radius:2px;}
+  .flashcard .back-divider{width:40px;height:2px;background:var(--accent);margin:14px auto;border-radius:2px;}
+  .flashcard .front-recap{color:var(--text-secondary);font-size:15px;font-weight:500;}
+  .flashcard .side-label-inline{position:static;display:block;margin-bottom:10px;}
 
   .study-actions{display:flex;gap:12px;margin-top:20px;}
   .study-actions .btn{flex:1;justify-content:center;padding:14px;font-size:15px;}
@@ -373,7 +375,7 @@
     'new-discipline','edit-discipline','archive-discipline','restore-discipline','delete-discipline',
     'new-aula','edit-aula','archive-aula','restore-aula','delete-aula',
     'new-card','edit-card','archive-card','restore-card','delete-card',
-    'open-import','edit-study-card'
+    'open-import','edit-study-card','quick-card'
   ]);
 
   function updateOwnerLockBtn(){
@@ -792,6 +794,60 @@
     });
   }
 
+  /* ---------- Quick card creation: fill in whatever containers are missing
+     below the current level with a reusable "Geral" bucket, so a card can be
+     created from the Biblioteca, a módulo, or a disciplina without manually
+     building the full hierarchy first. ---------- */
+  const QUICK_DEFAULT_NAME = 'Geral';
+  const QUICK_DEFAULT_EMOJI = '⚡';
+  const QUICK_DEFAULT_COLOR = '#94a3b8';
+
+  function getOrCreateDefaultModulo(){
+    let m = state.modulos.find(x=>x.name===QUICK_DEFAULT_NAME && !x.archived);
+    if(!m){
+      m = { id: uid(), name: QUICK_DEFAULT_NAME, emoji: QUICK_DEFAULT_EMOJI, color: QUICK_DEFAULT_COLOR, archived:false, disciplinas:[] };
+      state.modulos.push(m);
+    }
+    return m;
+  }
+  function getOrCreateDefaultDisciplina(modulo){
+    let d = modulo.disciplinas.find(x=>x.name===QUICK_DEFAULT_NAME && !x.archived);
+    if(!d){
+      d = { id: uid(), name: QUICK_DEFAULT_NAME, emoji: QUICK_DEFAULT_EMOJI, color: QUICK_DEFAULT_COLOR, archived:false, aulas:[] };
+      modulo.disciplinas.push(d);
+    }
+    return d;
+  }
+  function getOrCreateDefaultAula(discipline){
+    let a = discipline.aulas.find(x=>x.name===QUICK_DEFAULT_NAME && !x.archived);
+    if(!a){
+      a = { id: uid(), name: QUICK_DEFAULT_NAME, archived:false, cards:[] };
+      discipline.aulas.push(a);
+    }
+    return a;
+  }
+
+  function quickNewCard(level, id){
+    let aula;
+    if(level==='library'){
+      const m = getOrCreateDefaultModulo();
+      const d = getOrCreateDefaultDisciplina(m);
+      aula = getOrCreateDefaultAula(d);
+    }else if(level==='modulo'){
+      const m = getModulo(id);
+      if(!m) return;
+      const d = getOrCreateDefaultDisciplina(m);
+      aula = getOrCreateDefaultAula(d);
+    }else if(level==='discipline'){
+      const found = findDiscipline(id);
+      if(!found) return;
+      aula = getOrCreateDefaultAula(found.discipline);
+    }
+    if(!aula) return;
+    saveContent();
+    openCardModal(aula, null, { onSaved: ()=> goAula(aula.id) });
+  }
+
   /* ---------- Aula modal ---------- */
   function openAulaModal(discipline, existing){
     const isEdit = !!existing;
@@ -1089,7 +1145,10 @@
     let html = renderBreadcrumb([{label:'Biblioteca'}]);
     html += `<h1 class="page-title">Biblioteca</h1><p class="page-sub">Seus módulos de estudo</p>`;
     if(ownerMode){
-      html += `<div class="toolbar"><button class="btn btn-primary" data-action="new-modulo">+ Novo módulo</button></div>`;
+      html += `<div class="toolbar">
+        <button class="btn btn-primary" data-action="new-modulo">+ Novo módulo</button>
+        <button class="btn btn-ghost" data-action="quick-card" data-level="library">⚡ Novo card rápido</button>
+      </div>`;
     }
 
     if(active.length===0 && archived.length===0){
@@ -1158,6 +1217,7 @@
     html += `<h1 class="page-title">${m.emoji} ${escapeHtml(m.name)}</h1><p class="page-sub">${active.length} disciplina${active.length===1?'':'s'}</p>`;
     html += `<div class="toolbar">
       ${ownerMode ? `<button class="btn btn-primary" data-action="new-discipline">+ Nova disciplina</button>
+      <button class="btn btn-ghost" data-action="quick-card" data-level="modulo" data-id="${m.id}">⚡ Novo card rápido</button>
       <button class="btn btn-ghost" data-action="edit-modulo" data-id="${m.id}">Editar módulo</button>` : ''}
       <button class="btn btn-ghost" data-action="export-modulo" data-id="${m.id}">⇩ Exportar tudo</button>
     </div>`;
@@ -1228,6 +1288,7 @@
     html += `<h1 class="page-title">${d.emoji} ${escapeHtml(d.name)}</h1><p class="page-sub">${active.length} aula${active.length===1?'':'s'}</p>`;
     html += `<div class="toolbar">
       ${ownerMode ? `<button class="btn btn-primary" data-action="new-aula">+ Nova aula</button>
+      <button class="btn btn-ghost" data-action="quick-card" data-level="discipline" data-id="${d.id}">⚡ Novo card rápido</button>
       <button class="btn btn-ghost" data-action="edit-discipline" data-id="${d.id}">Editar disciplina</button>` : ''}
       <button class="btn btn-ghost" data-action="export-discipline" data-id="${d.id}">⇩ Exportar tudo</button>
     </div>`;
@@ -1507,8 +1568,10 @@
         </div>`;
       }else{
         html += `<div class="flashcard revealed">
-          <span class="side-label">Resposta</span>
+          <span class="side-label">Pergunta</span>
+          <div class="front-recap">${escapeHtml(cardData.front)}</div>
           <div class="back-divider"></div>
+          <span class="side-label side-label-inline">Resposta</span>
           <div>${escapeHtml(cardData.back)}</div>
         </div>`;
       }
@@ -1561,6 +1624,7 @@
       case 'go-library': goLibrary(); break;
       case 'noop': break;
 
+      case 'quick-card': quickNewCard(btn.dataset.level, id); break;
       case 'new-modulo': openModuloModal(null); break;
       case 'edit-modulo': openModuloModal(getModulo(id)); break;
       case 'archive-modulo': {
@@ -1728,6 +1792,23 @@
     const key = toggle.dataset.key;
     uiState.openArchives[key] = !uiState.openArchives[key];
     render();
+  });
+
+  // Keyboard shortcuts during study: Space = reveal (same as tapping the card),
+  // 1 = Ainda não, 2 = Entendi, once revealed.
+  document.addEventListener('keydown', (e)=>{
+    if(view.type !== 'study' || !session) return;
+    if(e.target && /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) return;
+    if(modalRoot.children.length>0) return;
+    if(e.key===' '){
+      e.preventDefault();
+      if(!session.revealed) revealCard();
+      return;
+    }
+    if(session.revealed){
+      if(e.key==='1') answerCard(false);
+      else if(e.key==='2') answerCard(true);
+    }
   });
 
   document.getElementById('owner-lock-btn').addEventListener('click', ()=>{
