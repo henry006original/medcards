@@ -285,6 +285,21 @@
   .study-actions .btn{flex:1;justify-content:center;padding:14px;font-size:15px;}
   .study-controls{display:flex;justify-content:center;gap:10px;margin-top:16px;flex-wrap:wrap;}
 
+  .srs-actions{gap:8px;}
+  .srs-btn{
+    flex-direction:column;gap:2px;padding:12px 6px;font-size:13.5px;color:#fff;
+  }
+  .srs-preview{font-size:11.5px;font-weight:700;opacity:.85;}
+  .srs-again{background:var(--danger);}
+  .srs-again:hover{filter:brightness(1.1);}
+  .srs-hard{background:var(--warning);}
+  .srs-hard:hover{filter:brightness(1.1);}
+  .srs-good{background:var(--success);color:#08130a;}
+  .srs-good:hover{filter:brightness(1.1);}
+  .srs-easy{background:#3b82f6;}
+  .srs-easy:hover{filter:brightness(1.1);}
+  @media(max-width:480px){ .srs-btn{font-size:12px;padding:10px 4px;} }
+
   .completion-box{text-align:center;padding:60px 20px;}
   .completion-emoji{font-size:56px;margin-bottom:16px;}
   .completion-title{font-size:24px;font-weight:800;margin-bottom:8px;}
@@ -362,12 +377,10 @@
     return res.json();
   }
   async function apiVerifyPin(pin){
-    try{
-      const res = await fetch(API_BASE + '/verify-pin', {
-        method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({pin})
-      });
-      return res.ok;
-    }catch(e){ return false; }
+    const res = await fetch(API_BASE + '/verify-pin', {
+      method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({pin})
+    });
+    return res.ok;
   }
 
   const OWNER_ONLY_ACTIONS = new Set([
@@ -375,7 +388,7 @@
     'new-discipline','edit-discipline','archive-discipline','restore-discipline','delete-discipline',
     'new-aula','edit-aula','archive-aula','restore-aula','delete-aula',
     'new-card','edit-card','archive-card','restore-card','delete-card',
-    'open-import','edit-study-card','quick-card'
+    'open-import','edit-study-card','quick-card','quick-import'
   ]);
 
   function updateOwnerLockBtn(){
@@ -407,18 +420,24 @@
     async function trySubmit(){
       const val = input.value;
       if(!val) return;
-      const ok = await apiVerifyPin(val);
-      if(ok){
-        ownerPin = val;
-        sessionStorage.setItem('mc_owner_pin', val);
-        ownerMode = true;
-        updateOwnerLockBtn();
-        closeModal();
-        render();
-      }else{
+      try{
+        const ok = await apiVerifyPin(val);
+        if(ok){
+          ownerPin = val;
+          sessionStorage.setItem('mc_owner_pin', val);
+          ownerMode = true;
+          updateOwnerLockBtn();
+          closeModal();
+          render();
+        }else{
+          errorEl.textContent = 'PIN incorreto.';
+          errorEl.style.display = '';
+          input.value = '';
+          input.focus();
+        }
+      }catch(e){
+        errorEl.textContent = 'Erro de conexão com o servidor — verifique sua internet e tente de novo.';
         errorEl.style.display = '';
-        input.value = '';
-        input.focus();
       }
     }
     document.getElementById('confirm-pin-btn').addEventListener('click', trySubmit);
@@ -487,6 +506,7 @@
       state.streak = loadLocalStreak();
       view = { type:'library' };
       render();
+      if(migrateSrs(state.modulos)) saveContent();
     }catch(err){
       if(err && err.code === 401){
         ownerPin = null;
@@ -827,25 +847,36 @@
     return a;
   }
 
-  function quickNewCard(level, id){
-    let aula;
+  function resolveQuickAula(level, id){
     if(level==='library'){
       const m = getOrCreateDefaultModulo();
       const d = getOrCreateDefaultDisciplina(m);
-      aula = getOrCreateDefaultAula(d);
+      return getOrCreateDefaultAula(d);
     }else if(level==='modulo'){
       const m = getModulo(id);
-      if(!m) return;
+      if(!m) return null;
       const d = getOrCreateDefaultDisciplina(m);
-      aula = getOrCreateDefaultAula(d);
+      return getOrCreateDefaultAula(d);
     }else if(level==='discipline'){
       const found = findDiscipline(id);
-      if(!found) return;
-      aula = getOrCreateDefaultAula(found.discipline);
+      if(!found) return null;
+      return getOrCreateDefaultAula(found.discipline);
     }
+    return null;
+  }
+
+  function quickNewCard(level, id){
+    const aula = resolveQuickAula(level, id);
     if(!aula) return;
     saveContent();
     openCardModal(aula, null, { onSaved: ()=> goAula(aula.id) });
+  }
+
+  function quickImportCards(level, id){
+    const aula = resolveQuickAula(level, id);
+    if(!aula) return;
+    saveContent();
+    openImportModal(aula, { onImported: ()=> goAula(aula.id) });
   }
 
   /* ---------- Aula modal ---------- */
@@ -903,7 +934,7 @@
       if(isEdit){
         existing.front = front; existing.back = back;
       }else{
-        aula.cards.push({ id: uid(), front, back, archived:false, lastResult:null, lastStudiedAt:null });
+        aula.cards.push({ id: uid(), front, back, archived:false, lastResult:null, lastStudiedAt:null, srs: createSrs() });
       }
       saveContent(); closeModal();
       if(opts.onSaved) opts.onSaved(); else render();
@@ -928,7 +959,8 @@
   }
 
   /* ---------- Import modal ---------- */
-  function openImportModal(aula){
+  function openImportModal(aula, opts){
+    opts = opts || {};
     openModal(`
       <div class="modal-title">Importar cards em massa</div>
       <div class="form-group">
@@ -1030,9 +1062,10 @@
     confirmBtn.addEventListener('click', ()=>{
       if(currentValid.length===0) return;
       currentValid.forEach(c=>{
-        aula.cards.push({ id: uid(), front:c.front, back:c.back, archived:false, lastResult:null, lastStudiedAt:null });
+        aula.cards.push({ id: uid(), front:c.front, back:c.back, archived:false, lastResult:null, lastStudiedAt:null, srs: createSrs() });
       });
-      saveContent(); closeModal(); render();
+      saveContent(); closeModal();
+      if(opts.onImported) opts.onImported(); else render();
     });
   }
 
@@ -1148,6 +1181,7 @@
       html += `<div class="toolbar">
         <button class="btn btn-primary" data-action="new-modulo">+ Novo módulo</button>
         <button class="btn btn-ghost" data-action="quick-card" data-level="library">⚡ Novo card rápido</button>
+        <button class="btn btn-ghost" data-action="quick-import" data-level="library">⇪ Importar</button>
       </div>`;
     }
 
@@ -1218,6 +1252,7 @@
     html += `<div class="toolbar">
       ${ownerMode ? `<button class="btn btn-primary" data-action="new-discipline">+ Nova disciplina</button>
       <button class="btn btn-ghost" data-action="quick-card" data-level="modulo" data-id="${m.id}">⚡ Novo card rápido</button>
+      <button class="btn btn-ghost" data-action="quick-import" data-level="modulo" data-id="${m.id}">⇪ Importar</button>
       <button class="btn btn-ghost" data-action="edit-modulo" data-id="${m.id}">Editar módulo</button>` : ''}
       <button class="btn btn-ghost" data-action="export-modulo" data-id="${m.id}">⇩ Exportar tudo</button>
     </div>`;
@@ -1289,6 +1324,7 @@
     html += `<div class="toolbar">
       ${ownerMode ? `<button class="btn btn-primary" data-action="new-aula">+ Nova aula</button>
       <button class="btn btn-ghost" data-action="quick-card" data-level="discipline" data-id="${d.id}">⚡ Novo card rápido</button>
+      <button class="btn btn-ghost" data-action="quick-import" data-level="discipline" data-id="${d.id}">⇪ Importar</button>
       <button class="btn btn-ghost" data-action="edit-discipline" data-id="${d.id}">Editar disciplina</button>` : ''}
       <button class="btn btn-ghost" data-action="export-discipline" data-id="${d.id}">⇩ Exportar tudo</button>
     </div>`;
@@ -1356,9 +1392,22 @@
       {label:d.name, action:'open-discipline-'+d.id},
       {label:a.name}
     ]);
+    const stats = active.length>0 ? aulaSrsStats(a) : {paraRevisar:0,novos:0,aprendendo:0,noPrazo:0};
+    const dailyAllowance = Math.max(0, loadNewCardsPerDaySetting() - loadDailyNewCount(a.id));
+    const hasDueNow = stats.paraRevisar>0 || (stats.novos>0 && dailyAllowance>0);
     html += `<h1 class="page-title">${escapeHtml(a.name)}</h1><p class="page-sub">${active.length} card${active.length===1?'':'s'} ativo${active.length===1?'':'s'}</p>`;
+    if(active.length>0){
+      html += `<div class="item-meta" style="margin-bottom:14px;">
+        <span class="badge badge-wrong">⏰ ${stats.paraRevisar} p/ revisar</span>
+        <span class="badge" style="background:#6366f122;color:#a5b4fc;">🆕 ${stats.novos} novos</span>
+        <span class="badge" style="background:#f59e0b22;color:#fbbf24;">📖 ${stats.aprendendo} aprendendo</span>
+        <span class="badge badge-correct">✅ ${stats.noPrazo} no prazo</span>
+      </div>`;
+    }
     html += `<div class="toolbar">
-      <button class="btn btn-success" data-action="start-study" data-id="${a.id}" ${active.length===0?'disabled':''}>▶ Estudar</button>
+      ${active.length>0 ? `<button class="btn btn-success" data-action="start-study" data-id="${a.id}" ${!hasDueNow?'disabled':''} title="${hasDueNow?'':'Nada vencido agora — use Revisão Rápida pra estudar tudo mesmo assim'}">🧠 Estudar (Espaçada)</button>
+      <button class="btn btn-ghost" data-action="study-all" data-id="${a.id}">⚡ Estudar (Rápida)</button>
+      <button class="btn-icon" data-action="open-study-settings" title="Configurações de estudo">⚙️</button>` : ''}
       ${ownerMode ? `<button class="btn btn-primary" data-action="new-card">+ Novo card</button>
       <button class="btn btn-ghost" data-action="open-import">⇪ Importar</button>
       <button class="btn btn-ghost" data-action="edit-aula" data-id="${a.id}">Editar aula</button>` : ''}
@@ -1420,22 +1469,276 @@
     </div>`;
   }
 
+  /* ---------------- Spaced repetition (SM-2 style) ---------------- */
+  const LEARNING_STEPS = [10/1440, 0.5];   // 10min, 12h
+  const RELEARNING_STEPS = [10/1440];       // 10min
+  const GRADUATING_INTERVAL_GOOD = 1;       // day
+  const GRADUATING_INTERVAL_EASY = 4;       // days
+  const DEFAULT_NEW_CARDS_PER_DAY = 9999;   // effectively unlimited unless the user sets a lower cap
+  const DEFAULT_MAX_CARDS_PER_DAY = DEFAULT_NEW_CARDS_PER_DAY; // same "unlimited" sentinel
+  const MIN_EASE = 1.3;
+  const DAY_MS = 86400000;
+
+  // User-adjustable "new cards per day" cap (global, not per-aula). Unlimited by default —
+  // this only exists so the user can throttle themselves later if they want to, not to
+  // silently hide cards they haven't studied yet.
+  function loadNewCardsPerDaySetting(){
+    const raw = localStorage.getItem('mc_new_per_day');
+    const n = raw!==null ? parseInt(raw,10) : NaN;
+    return (isNaN(n) || n<0) ? DEFAULT_NEW_CARDS_PER_DAY : n;
+  }
+  function saveNewCardsPerDaySetting(n){
+    localStorage.setItem('mc_new_per_day', String(n));
+  }
+
+  // User-adjustable "max cards per day" cap (global, not per-aula): a ceiling on the
+  // WHOLE deck (new + due) pulled per aula per day, independent of the new-cards cap.
+  function loadMaxCardsPerDaySetting(){
+    const raw = localStorage.getItem('mc_max_per_day');
+    const n = raw!==null ? parseInt(raw,10) : NaN;
+    return (isNaN(n) || n<0) ? DEFAULT_MAX_CARDS_PER_DAY : n;
+  }
+  function saveMaxCardsPerDaySetting(n){
+    localStorage.setItem('mc_max_per_day', String(n));
+  }
+
+  function createSrs(){
+    return { state:'new', ease:2.5, interval:0, reps:0, lapses:0, step:0, due: Date.now() };
+  }
+  function ensureCardSrs(card){
+    if(!card.srs) card.srs = createSrs();
+    return card.srs;
+  }
+
+  // Returns true if any card was missing srs and got migrated (caller should persist).
+  function migrateSrs(modulos){
+    let migrated = false;
+    modulos.forEach(m=>m.disciplinas.forEach(d=>d.aulas.forEach(a=>a.cards.forEach(c=>{
+      if(!c.srs){ c.srs = createSrs(); migrated = true; }
+    }))));
+    return migrated;
+  }
+
+  // Pure: given the current srs and a rating ('again'|'hard'|'good'|'easy'),
+  // returns the NEXT srs object without mutating the input. Used both to
+  // actually apply an answer and to preview the resulting interval on buttons.
+  function computeNextSrs(srs, rating){
+    const next = Object.assign({}, srs);
+    const now = Date.now();
+
+    if(next.state === 'new' || next.state === 'learning'){
+      if(rating === 'again'){
+        next.state = 'learning'; next.step = 0;
+        next.due = now + LEARNING_STEPS[0] * DAY_MS;
+      }else if(rating === 'hard'){
+        next.state = 'learning';
+        const stepDays = LEARNING_STEPS[next.step] !== undefined ? LEARNING_STEPS[next.step] : LEARNING_STEPS[LEARNING_STEPS.length-1];
+        next.due = now + stepDays * DAY_MS;
+      }else if(rating === 'good'){
+        const nextStep = next.step + 1;
+        if(nextStep < LEARNING_STEPS.length){
+          next.state = 'learning'; next.step = nextStep;
+          next.due = now + LEARNING_STEPS[nextStep] * DAY_MS;
+        }else{
+          next.state = 'review'; next.step = 0;
+          next.interval = GRADUATING_INTERVAL_GOOD;
+          next.reps += 1;
+          next.due = now + next.interval * DAY_MS;
+        }
+      }else{ // easy
+        next.state = 'review'; next.step = 0;
+        next.interval = GRADUATING_INTERVAL_EASY;
+        next.reps += 1;
+        next.due = now + next.interval * DAY_MS;
+      }
+      return next;
+    }
+
+    if(next.state === 'relearning'){
+      if(rating === 'again'){
+        next.step = 0;
+        next.due = now + RELEARNING_STEPS[0] * DAY_MS;
+      }else if(rating === 'hard'){
+        const stepDays = RELEARNING_STEPS[next.step] !== undefined ? RELEARNING_STEPS[next.step] : RELEARNING_STEPS[RELEARNING_STEPS.length-1];
+        next.due = now + stepDays * DAY_MS;
+      }else{ // good or easy: graduate back to review with a lapse penalty
+        next.state = 'review'; next.step = 0;
+        next.interval = Math.max(1, next.interval * 0.5);
+        if(next.interval >= 1) next.interval = Math.ceil(next.interval);
+        next.reps += 1;
+        next.due = now + next.interval * DAY_MS;
+      }
+      return next;
+    }
+
+    // state === 'review'
+    if(rating === 'again'){
+      next.lapses += 1;
+      next.ease = Math.max(MIN_EASE, next.ease - 0.2);
+      next.state = 'relearning'; next.step = 0;
+      next.due = now + RELEARNING_STEPS[0] * DAY_MS;
+      // interval is intentionally left as-is; re-graduating halves it (see 'relearning' branch above)
+      return next;
+    }
+    if(rating === 'hard'){
+      next.ease = Math.max(MIN_EASE, next.ease - 0.15);
+      next.interval = next.interval * 1.2;
+    }else if(rating === 'good'){
+      next.interval = next.interval * next.ease;
+      next.reps += 1;
+    }else{ // easy
+      next.ease = next.ease + 0.15;
+      next.interval = next.interval * next.ease * 1.3;
+      next.reps += 1;
+    }
+    if(next.interval >= 1) next.interval = Math.ceil(next.interval);
+    const fuzz = 1 + (Math.random()*0.1 - 0.05); // +/-5%
+    next.due = now + next.interval * fuzz * DAY_MS;
+    return next;
+  }
+
+  function formatInterval(days){
+    if(days < 1/24){
+      const mins = Math.max(1, Math.round(days * 1440));
+      return mins + 'min';
+    }
+    if(days < 1){
+      const hours = Math.max(1, Math.round(days * 24));
+      return hours + 'h';
+    }
+    if(days < 30) return Math.round(days) + 'd';
+    if(days < 365) return Math.round(days/30) + 'm';
+    return Math.round(days/365) + 'a';
+  }
+
+  function previewIntervals(srs){
+    const out = {};
+    ['again','hard','good','easy'].forEach(rating=>{
+      const next = computeNextSrs(srs, rating);
+      const days = (next.due - Date.now()) / DAY_MS;
+      out[rating] = formatInterval(Math.max(days, 1/1440));
+    });
+    return out;
+  }
+
   /* ---------------- Study mode ---------------- */
-  function startStudy(aulaId){
+  // Per-aula "new cards introduced today" counter (local, resets daily; matches Anki's per-deck new-card limit).
+  function loadDailyNewCount(aulaId){
+    try{
+      const raw = JSON.parse(localStorage.getItem('mc_srs_daily_'+aulaId));
+      if(raw && raw.date === todayStr()) return raw.count;
+    }catch(e){}
+    return 0;
+  }
+  function addDailyNewCount(aulaId, n){
+    if(n<=0) return;
+    localStorage.setItem('mc_srs_daily_'+aulaId, JSON.stringify({ date: todayStr(), count: loadDailyNewCount(aulaId)+n }));
+  }
+
+  // Per-aula "total cards pulled into study today" counter (new + due combined;
+  // matches Anki's overall daily deck limit, separate from the new-cards-only cap above).
+  function loadDailyStudiedCount(aulaId){
+    try{
+      const raw = JSON.parse(localStorage.getItem('mc_srs_studied_daily_'+aulaId));
+      if(raw && raw.date === todayStr()) return raw.count;
+    }catch(e){}
+    return 0;
+  }
+  function addDailyStudiedCount(aulaId, n){
+    if(n<=0) return;
+    localStorage.setItem('mc_srs_studied_daily_'+aulaId, JSON.stringify({ date: todayStr(), count: loadDailyStudiedCount(aulaId)+n }));
+  }
+
+  function aulaSrsStats(aula){
+    const now = Date.now();
+    const active = aula.cards.filter(c=>!c.archived);
+    active.forEach(c=>ensureCardSrs(c));
+    return {
+      paraRevisar: active.filter(c=>c.srs.state!=='new' && c.srs.due<=now).length,
+      novos: active.filter(c=>c.srs.state==='new').length,
+      aprendendo: active.filter(c=>c.srs.state==='learning'||c.srs.state==='relearning').length,
+      noPrazo: active.filter(c=>c.srs.state==='review' && c.srs.due>now).length
+    };
+  }
+
+  function openStudySettingsModal(){
+    const current = loadNewCardsPerDaySetting();
+    const isUnlimited = current >= DEFAULT_NEW_CARDS_PER_DAY;
+    const currentMax = loadMaxCardsPerDaySetting();
+    const isMaxUnlimited = currentMax >= DEFAULT_MAX_CARDS_PER_DAY;
+    openModal(`
+      <div class="modal-title">⚙️ Configurações de estudo</div>
+      <div class="form-group">
+        <label class="form-label">Cards novos por dia (revisão espaçada)</label>
+        <input type="number" id="f-new-per-day" min="0" placeholder="Sem limite" value="${isUnlimited?'':current}">
+        <p style="font-size:12px;color:var(--text-secondary);margin-top:6px;">Deixe em branco pra não ter limite (todos os cards novos entram na fila de uma vez). Coloque um número se quiser se auto-limitar, tipo Anki.</p>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Máximo de cartões por dia (novos + revisões)</label>
+        <input type="number" id="f-max-per-day" min="0" placeholder="Sem limite" value="${isMaxUnlimited?'':currentMax}">
+        <p style="font-size:12px;color:var(--text-secondary);margin-top:6px;">Teto geral do baralho por dia, somando novos e vencidos. Revisões vencidas sempre entram; se o teto apertar, quem fica de fora são os cards novos.</p>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-ghost" data-action="close-modal">Cancelar</button>
+        <button class="btn btn-primary" id="save-study-settings-btn">Salvar</button>
+      </div>
+    `);
+    document.getElementById('save-study-settings-btn').addEventListener('click', ()=>{
+      const raw = document.getElementById('f-new-per-day').value.trim();
+      const n = raw==='' ? DEFAULT_NEW_CARDS_PER_DAY : Math.max(0, parseInt(raw,10)||0);
+      saveNewCardsPerDaySetting(n);
+      const rawMax = document.getElementById('f-max-per-day').value.trim();
+      const nMax = rawMax==='' ? DEFAULT_MAX_CARDS_PER_DAY : Math.max(0, parseInt(rawMax,10)||0);
+      saveMaxCardsPerDaySetting(nMax);
+      closeModal();
+      render();
+    });
+  }
+
+  // quickMode=true -> "Estudar tudo mesmo assim": binary Entendi/Ainda não,
+  // never touches srs at all, so it never disturbs the spaced schedule.
+  // quickMode falsy -> normal spaced-repetition study, due-filtered, SM-2 ratings.
+  function startStudy(aulaId, quickMode){
     const found = findAula(aulaId);
     if(!found) return;
     const activeCards = found.aula.cards.filter(c=>!c.archived);
     if(activeCards.length===0) return;
+    activeCards.forEach(c=>ensureCardSrs(c));
+
+    let deck;
+    if(quickMode){
+      deck = shuffle(activeCards.map(c=>c.id));
+    }else{
+      const now = Date.now();
+      const due = activeCards.filter(c=>c.srs.state!=='new' && c.srs.due<=now).sort((a,b)=>a.srs.due-b.srs.due);
+      const newAllowance = Math.max(0, loadNewCardsPerDaySetting() - loadDailyNewCount(aulaId));
+      let fresh = activeCards.filter(c=>c.srs.state==='new').slice(0, newAllowance);
+
+      // Overall daily cap (new + due combined): due reviews always win, so any
+      // trimming needed to fit under the cap comes out of the new cards first.
+      const maxAllowance = Math.max(0, loadMaxCardsPerDaySetting() - loadDailyStudiedCount(aulaId));
+      fresh = fresh.slice(0, Math.max(0, maxAllowance - due.length));
+
+      if(fresh.length>0) addDailyNewCount(aulaId, fresh.length);
+      const combined = due.concat(fresh);
+      if(combined.length>0) addDailyStudiedCount(aulaId, combined.length);
+      deck = combined.map(c=>c.id);
+    }
+    if(deck.length===0){ goAula(aulaId); return; } // nothing to study right now — show the aula view (stats/fallback button) instead of doing nothing
+
     session = {
       aulaId,
+      mode: quickMode ? 'quick' : 'spaced',
       round: 'main',
-      deck: shuffle(activeCards.map(c=>c.id)),
+      deck,
       reviewDeck: [],
+      hadReview: false,
+      initialLength: deck.length,
       pos: 0,
       revealed: false,
       correctCount: 0,
       wrongCount: 0,
-      hadReview: false,
+      done: false,
       history: []
     };
     view = {type:'study', aulaId};
@@ -1449,71 +1752,81 @@
     return findCard(id);
   }
 
-  function snapshotSession(){
-    return JSON.parse(JSON.stringify({
-      round: session.round, deck: session.deck, reviewDeck: session.reviewDeck,
-      pos: session.pos, revealed: session.revealed,
-      correctCount: session.correctCount, wrongCount: session.wrongCount,
-      hadReview: session.hadReview
-    }));
-  }
-
   function revealCard(){
-    if(!session || session.round==='done') return;
+    if(!session || session.done) return;
     session.revealed = true;
     render();
   }
 
-  function answerCard(correct){
-    if(!session || session.round==='done' || !session.revealed) return;
+  // input: rating string ('again'|'hard'|'good'|'easy') in spaced mode, or
+  // boolean (true=Entendi, false=Ainda não) in quick mode.
+  function answerCard(input){
+    if(!session || session.done || !session.revealed) return;
     const cardId = session.deck[session.pos];
     const found = findCard(cardId);
-    const snap = snapshotSession();
-    snap.cardId = cardId;
-    snap.prevResult = found ? found.card.lastResult : null;
-    snap.prevStudiedAt = found ? found.card.lastStudiedAt : null;
-    session.history.push(snap);
+    if(!found) return;
+    const isQuick = session.mode === 'quick';
+    const correct = input !== 'again'; // same 4-way rating in both modes; quick mode just skips touching srs below
 
-    if(found){
-      found.card.lastResult = correct ? 'correto' : 'errou';
-      found.card.lastStudiedAt = todayStr();
-      setCardProgress(cardId, found.card.lastResult, found.card.lastStudiedAt);
+    session.history.push({
+      pos: session.pos,
+      correctCount: session.correctCount, wrongCount: session.wrongCount,
+      deck: session.deck.slice(), round: session.round, reviewDeck: session.reviewDeck.slice(),
+      cardId,
+      prevSrs: isQuick ? null : JSON.parse(JSON.stringify(found.card.srs)),
+      prevResult: found.card.lastResult, prevStudiedAt: found.card.lastStudiedAt
+    });
+
+    if(!isQuick){
+      const nextSrs = computeNextSrs(ensureCardSrs(found.card), input);
+      found.card.srs = nextSrs;
+      // Cards still mid learning/relearning reappear later in this same session.
+      if(nextSrs.state === 'learning' || nextSrs.state === 'relearning') session.deck.push(cardId);
     }
-    if(correct){
-      session.correctCount++;
-    }else{
-      session.wrongCount++;
-      if(!session.reviewDeck.includes(cardId)) session.reviewDeck.push(cardId);
-    }
+
+    found.card.lastResult = correct ? 'correto' : 'errou';
+    found.card.lastStudiedAt = todayStr();
+    setCardProgress(cardId, found.card.lastResult, found.card.lastStudiedAt);
+    if(correct) session.correctCount++; else session.wrongCount++;
+
+    if(isQuick && !correct && !session.reviewDeck.includes(cardId)) session.reviewDeck.push(cardId);
+
     session.pos++;
     session.revealed = false;
     if(session.pos >= session.deck.length){
-      if(session.round==='main' && session.reviewDeck.length>0){
+      if(isQuick && session.round==='main' && session.reviewDeck.length>0){
         session.round = 'review';
         session.hadReview = true;
         session.deck = shuffle(session.reviewDeck);
         session.reviewDeck = [];
         session.pos = 0;
       }else{
-        session.round = 'done';
+        session.done = true;
         registerStudyCompletion();
       }
     }
+    if(!isQuick) saveContent();
     render();
   }
 
   function undoAnswer(){
     if(!session || session.history.length===0) return;
     const snap = session.history.pop();
-    session.round = snap.round; session.deck = snap.deck; session.reviewDeck = snap.reviewDeck;
-    session.pos = snap.pos; session.revealed = false; // always show the front again, never jump back to the revealed back
+    session.pos = snap.pos;
+    session.revealed = false; // always show the front again, never jump back to the revealed back
     session.correctCount = snap.correctCount; session.wrongCount = snap.wrongCount;
-    session.hadReview = snap.hadReview;
-    if(snap.cardId){
-      const found = findCard(snap.cardId);
-      if(found){ found.card.lastResult = snap.prevResult; found.card.lastStudiedAt = snap.prevStudiedAt; }
-      setCardProgress(snap.cardId, snap.prevResult, snap.prevStudiedAt);
+    session.done = false;
+    session.deck = snap.deck;
+    session.round = snap.round;
+    session.reviewDeck = snap.reviewDeck;
+    const found = findCard(snap.cardId);
+    if(found){
+      if(snap.prevSrs) found.card.srs = snap.prevSrs;
+      found.card.lastResult = snap.prevResult;
+      found.card.lastStudiedAt = snap.prevStudiedAt;
     }
+    setCardProgress(snap.cardId, snap.prevResult, snap.prevStudiedAt);
+    if(session.mode==='spaced') saveContent();
     render();
   }
 
@@ -1535,7 +1848,7 @@
       {label:'Estudar'}
     ]);
 
-    if(session.round==='done'){
+    if(session.done){
       html += renderCompletionScreen(a);
       appEl.innerHTML = html;
       return;
@@ -1544,13 +1857,16 @@
     const total = session.deck.length;
     const posDisplay = Math.min(session.pos+1, total);
     const pct = total? Math.round((session.pos/total)*100) : 0;
-    const roundLabel = session.round==='review' ? 'Rodada de revisão' : 'Estudando';
 
     const sc = currentSessionCard();
     const cardData = sc ? sc.card : null;
 
+    const isQuick = session.mode === 'quick';
+    const topLabel = isQuick
+      ? (session.round==='review' ? 'Rodada de revisão (rápido)' : 'Estudando (rápido)')
+      : 'Estudando (espaçado)';
     html += `<div class="study-topbar">
-      <div class="page-title" style="font-size:19px;">${roundLabel}</div>
+      <div class="page-title" style="font-size:19px;">${topLabel}</div>
       <div class="study-stats">
         <span class="stat-correct">✓ ${session.correctCount}</span>
         <span class="stat-wrong">✕ ${session.wrongCount}</span>
@@ -1577,10 +1893,15 @@
       }
     }
 
-    if(session.revealed){
-      html += `<div class="study-actions">
-        <button class="btn btn-danger" data-action="answer-wrong">✕ Ainda não</button>
-        <button class="btn btn-success" data-action="answer-correct">✓ Entendi</button>
+    if(session.revealed && cardData){
+      // Same 4-way rating buttons in both modes; in quick mode they never touch
+      // the card's srs (no preview shown, since nothing will actually change).
+      const preview = isQuick ? null : previewIntervals(ensureCardSrs(cardData));
+      html += `<div class="study-actions srs-actions">
+        <button class="btn srs-btn srs-again" data-action="srs-again">De novo${preview?`<span class="srs-preview">${preview.again}</span>`:''}</button>
+        <button class="btn srs-btn srs-hard" data-action="srs-hard">Difícil${preview?`<span class="srs-preview">${preview.hard}</span>`:''}</button>
+        <button class="btn srs-btn srs-good" data-action="srs-good">Bom${preview?`<span class="srs-preview">${preview.good}</span>`:''}</button>
+        <button class="btn srs-btn srs-easy" data-action="srs-easy">Fácil${preview?`<span class="srs-preview">${preview.easy}</span>`:''}</button>
       </div>`;
     }
 
@@ -1594,8 +1915,9 @@
   }
 
   function renderCompletionScreen(a){
-    const title = session.hadReview ? 'Revisão concluída!' : 'Deck completo!';
-    const emoji = session.hadReview ? '🎯' : '🎉';
+    const hadRequeue = session.mode==='quick' ? session.hadReview : (session.deck.length > session.initialLength);
+    const title = hadRequeue ? 'Revisão concluída!' : 'Deck completo!';
+    const emoji = hadRequeue ? '🎯' : '🎉';
     return `<div class="completion-box">
       <div class="completion-emoji">${emoji}</div>
       <div class="completion-title">${title}</div>
@@ -1605,7 +1927,7 @@
         <div><div class="completion-stat-num" style="color:var(--danger)">${session.wrongCount}</div><div class="completion-stat-label">Erros</div></div>
       </div>
       <div class="toolbar" style="justify-content:center;">
-        <button class="btn btn-primary" data-action="restart-study" data-id="${a.id}">🔁 Estudar novamente</button>
+        <button class="btn btn-primary" data-action="restart-study" data-id="${a.id}" data-mode="${session.mode}">🔁 Estudar novamente</button>
         <button class="btn btn-ghost" data-action="exit-study">Voltar à aula</button>
       </div>
     </div>`;
@@ -1625,6 +1947,7 @@
       case 'noop': break;
 
       case 'quick-card': quickNewCard(btn.dataset.level, id); break;
+      case 'quick-import': quickImportCards(btn.dataset.level, id); break;
       case 'new-modulo': openModuloModal(null); break;
       case 'edit-modulo': openModuloModal(getModulo(id)); break;
       case 'archive-modulo': {
@@ -1740,6 +2063,8 @@
         break;
       }
 
+      case 'open-study-settings': openStudySettingsModal(); break;
+
       case 'export-aula': {
         const found = findAula(id);
         if(found) openExportModal(found.aula.cards.filter(c=>!c.archived), found.aula.name);
@@ -1763,10 +2088,13 @@
       }
 
       case 'start-study': startStudy(id); break;
-      case 'restart-study': startStudy(id); break;
+      case 'restart-study': startStudy(id, btn.dataset.mode==='quick'); break;
+      case 'study-all': startStudy(id, true); break;
       case 'reveal-card': revealCard(); break;
-      case 'answer-correct': answerCard(true); break;
-      case 'answer-wrong': answerCard(false); break;
+      case 'srs-again': answerCard('again'); break;
+      case 'srs-hard': answerCard('hard'); break;
+      case 'srs-good': answerCard('good'); break;
+      case 'srs-easy': answerCard('easy'); break;
       case 'undo-answer': undoAnswer(); break;
       case 'exit-study': exitStudy(); break;
       case 'edit-study-card': {
@@ -1795,7 +2123,7 @@
   });
 
   // Keyboard shortcuts during study: Space = reveal (same as tapping the card),
-  // 1 = Ainda não, 2 = Entendi, once revealed.
+  // 1/2/3/4 = De novo/Difícil/Bom/Fácil once revealed.
   document.addEventListener('keydown', (e)=>{
     if(view.type !== 'study' || !session) return;
     if(e.target && /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) return;
@@ -1806,8 +2134,10 @@
       return;
     }
     if(session.revealed){
-      if(e.key==='1') answerCard(false);
-      else if(e.key==='2') answerCard(true);
+      if(e.key==='1') answerCard('again');
+      else if(e.key==='2') answerCard('hard');
+      else if(e.key==='3') answerCard('good');
+      else if(e.key==='4') answerCard('easy');
     }
   });
 
