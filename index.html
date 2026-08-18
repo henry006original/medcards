@@ -503,10 +503,10 @@
       }
       state.modulos = Array.isArray(data.modulos) ? data.modulos : [];
       applyLocalProgress(state.modulos);
+      applyLocalSrs(state.modulos);
       state.streak = loadLocalStreak();
       view = { type:'library' };
       render();
-      if(migrateSrs(state.modulos)) saveContent();
     }catch(err){
       if(err && err.code === 401){
         ownerPin = null;
@@ -541,6 +541,25 @@
     if(lastResult == null) delete localProgress[cardId];
     else localProgress[cardId] = { lastResult, lastStudiedAt };
     saveLocalProgress();
+  }
+
+  // Spaced-repetition scheduling (srs) is per-device study progress too — it must
+  // never be sent to the shared cloud content, or answering a card would require
+  // the owner PIN and every friend's review schedule would collide in one document.
+  function loadLocalSrs(){
+    try{ return JSON.parse(localStorage.getItem('mc_srs')) || {}; }catch(e){ return {}; }
+  }
+  let localSrsStore = loadLocalSrs();
+  function saveLocalSrsStore(){ localStorage.setItem('mc_srs', JSON.stringify(localSrsStore)); }
+  function applyLocalSrs(modulos){
+    modulos.forEach(m=>m.disciplinas.forEach(d=>d.aulas.forEach(a=>a.cards.forEach(c=>{
+      c.srs = localSrsStore[c.id] || null;
+    }))));
+  }
+  function setCardSrs(cardId, srs){
+    if(srs == null) delete localSrsStore[cardId];
+    else localSrsStore[cardId] = srs;
+    saveLocalSrsStore();
   }
 
   function loadLocalStreak(){
@@ -585,7 +604,7 @@
     try{
       const cleanModulos = JSON.parse(JSON.stringify(state.modulos));
       cleanModulos.forEach(m=>m.disciplinas.forEach(d=>d.aulas.forEach(a=>a.cards.forEach(c=>{
-        c.lastResult = null; c.lastStudiedAt = null;
+        c.lastResult = null; c.lastStudiedAt = null; c.srs = null;
       }))));
       const path = API_SPACE === 'public' ? '/public' : '/private/save';
       const res = await fetch(API_BASE + path, {
@@ -1510,15 +1529,6 @@
     return card.srs;
   }
 
-  // Returns true if any card was missing srs and got migrated (caller should persist).
-  function migrateSrs(modulos){
-    let migrated = false;
-    modulos.forEach(m=>m.disciplinas.forEach(d=>d.aulas.forEach(a=>a.cards.forEach(c=>{
-      if(!c.srs){ c.srs = createSrs(); migrated = true; }
-    }))));
-    return migrated;
-  }
-
   // Pure: given the current srs and a rating ('again'|'hard'|'good'|'easy'),
   // returns the NEXT srs object without mutating the input. Used both to
   // actually apply an answer and to preview the resulting interval on buttons.
@@ -1780,6 +1790,7 @@
     if(!isQuick){
       const nextSrs = computeNextSrs(ensureCardSrs(found.card), input);
       found.card.srs = nextSrs;
+      setCardSrs(cardId, nextSrs);
       // Cards still mid learning/relearning reappear later in this same session.
       if(nextSrs.state === 'learning' || nextSrs.state === 'relearning') session.deck.push(cardId);
     }
@@ -1805,7 +1816,6 @@
         registerStudyCompletion();
       }
     }
-    if(!isQuick) saveContent();
     render();
   }
 
@@ -1826,7 +1836,7 @@
       found.card.lastStudiedAt = snap.prevStudiedAt;
     }
     setCardProgress(snap.cardId, snap.prevResult, snap.prevStudiedAt);
-    if(session.mode==='spaced') saveContent();
+    if(session.mode==='spaced') setCardSrs(snap.cardId, snap.prevSrs);
     render();
   }
 
